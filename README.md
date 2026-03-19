@@ -1,227 +1,289 @@
-# NewRSS MVP
+# NewRSS
 
-一个面向 Reeder 这类 RSS 阅读器的 Reader View 代理：
+中文 | [English](#english)
 
-- 拉取原始 RSS
-- 抓取文章正文并用 Readability 提取
-- 生成新的 RSS
-- 每条 item 指向本服务托管的干净原文网页
-- 支持多源、目录分类和 OPML 导出
+NewRSS 是一个面向 `Reeder` 等 RSS 阅读器的自托管 Reader View 工具。
 
-当前默认测试源：
+它会拉取原始 RSS，抓取文章正文并做 Readability 提取，然后重新生成适合阅读器订阅的新 RSS。每条条目都会指向本服务托管的干净网页，你可以直接在阅读器里打开并使用内置网页翻译。
 
-- `https://www.wired.com/feed/rss`
+## 功能
 
-## 输出方式
+- 多 RSS 源管理
+- 目录分组
+- OPML 导入
+- OPML 导出
+- 自动刷新
+- 抓取失败状态展示
+- 代理支持
+- 自托管正文页输出
 
-当前服务默认输出提取后的原文，不做服务端翻译：
+## 工作方式
+
+默认模式是“提取原文，不做服务端翻译”：
 
 - RSS item 的 `link` 指向本服务生成的正文网页
 - RSS item 的 `content:encoded` 也是提取后的原文 HTML
-- 文章页适合在 Reeder 里打开后使用内置网页翻译
+- 文章页适合在 Reeder 中打开后再用网页翻译
 
-## 管理功能
-
-服务内置管理 API 和管理页面：
+## 管理入口
 
 - 管理页：`/admin`
-- 源列表 API：`/api/feeds`
-- 单源刷新 API：`POST /api/feeds/:name/refresh`
-- 删除源 API：`DELETE /api/feeds/:name`
-- OPML 导入 API：`POST /api/opml/import`
-- OPML 导出：`/opml.xml`
+- 源列表 API：`GET /api/feeds`
+- 新增或更新源：`POST /api/feeds`
+- 删除源：`DELETE /api/feeds/:name`
+- 单源刷新：`POST /api/feeds/:name/refresh`
+- OPML 导入：`POST /api/opml/import`
+- OPML 导出：`GET /opml.xml`
 
-源支持一个 `folder` 字段，管理页会按目录分组显示，导出的 OPML 也会按目录分组。管理页也支持导入 OPML；你可以选择覆盖到指定目录，或者保留 OPML 原有目录结构。
+## 快速开始
 
-## 本地运行
+### 本地运行
 
 ```bash
 npm install
 npm start
 ```
 
-首次刷新：
+默认地址：
+
+- 管理页：`http://localhost:8787/admin`
+- 默认 feed：`http://localhost:8787/feeds/wired.xml`
+
+首次手动刷新：
 
 ```bash
 curl "http://localhost:8787/refresh?name=wired&url=https://www.wired.com/feed/rss"
 ```
 
-订阅地址：
+### Docker Compose
 
-- `http://localhost:8787/feeds/wired.xml`
-
-## Docker
-
-### 1. 准备环境文件
+1. 准备环境变量
 
 ```bash
 cp .env.example .env
 ```
 
-如果你通过 Tailscale 的 MagicDNS 访问，建议把 `.env` 里的 `APP_BASE_URL` 改成：
-
-```bash
-APP_BASE_URL=http://你的机器名:8787
-```
-
-这样 RSS 里生成的文章链接会稳定指向你的 Tailscale 地址，而不是容器内部地址。
-
-### 2. 启动服务
+2. 启动
 
 ```bash
 docker compose up -d --build
 ```
 
-### 3. 检查服务
+3. 检查
 
 ```bash
-curl http://localhost:8787/healthz
-curl http://localhost:8787/feeds/wired.xml
+curl http://localhost:8787/admin
 curl http://localhost:8787/api/feeds
 curl http://localhost:8787/opml.xml
 ```
 
-## macOS 家里部署
+## 家庭部署
 
-如果你的家里机器是 macOS，推荐按这个顺序部署：
-
-### 1. 安装 Docker Desktop
-
-先安装 Docker Desktop for Mac，并确保下面命令能正常执行：
+如果你在家里的 Mac 上长期运行，可以把 `APP_BASE_URL` 配成你自己的内网访问地址，例如：
 
 ```bash
-docker --version
-docker compose version
+APP_BASE_URL=http://your-device-name.sgponte:8787
 ```
 
-### 2. 安装 Tailscale
+或者任何你实际可访问到这台机器的地址。
 
-在家里这台 Mac 上安装 Tailscale 客户端并登录你的账号：
+这样生成出来的 feed 链接和文章页链接都会稳定指向该地址，而不是容器内部地址。
 
-- [Tailscale for macOS](https://tailscale.com/download/mac)
+## OPML
 
-登录后执行：
+### 导入
 
-```bash
-tailscale status
-```
+管理页支持直接上传 `OPML` 文件：
 
-记下这台机器在 tailnet 中的名字，后面会用它作为订阅地址，比如：
+- 可以保留 OPML 原有目录结构
+- 也可以指定一个目录，把导入的所有源统一放进去
+
+导入时会按 `source_url` 去重，避免把同一个源导入多份。
+
+### 导出
+
+管理页支持导出：
+
+- 全部目录
+- 单个目录
+
+也可以直接请求：
 
 ```text
-my-macbook
+/opml.xml
+/opml.xml?folder=TECH
 ```
-
-### 3. 配置 `.env`
-
-```bash
-cp .env.example .env
-```
-
-把 `.env` 里的 `APP_BASE_URL` 改成你的 Tailscale 地址：
-
-```bash
-APP_BASE_URL=http://my-macbook:8787
-```
-
-如果你希望第一次启动就自动带一个默认目录，也可以设置：
-
-```bash
-DEFAULT_FEED_FOLDER=News
-```
-
-如果某些国外源在你家网络里直连失败，比如 `NYTimes`，可以额外配置上游代理：
-
-```bash
-UPSTREAM_PROXY_URL=http://host.containers.internal:7890
-```
-
-也支持 `socks5://` 地址。
-
-### 4. 启动服务
-
-```bash
-docker compose up -d --build
-```
-
-### 5. 验证服务
-
-在这台 Mac 上执行：
-
-```bash
-curl http://localhost:8787/healthz
-curl http://localhost:8787/admin
-```
-
-如果 `healthz` 正常返回，管理页也能打开，就说明服务已经启动成功。
-
-### 6. 手机端访问
-
-在 iPhone 上：
-
-- 安装 Tailscale
-- 登录同一个账号
-- 确认手机也加入同一个 tailnet
-
-然后在 Reeder 里订阅：
-
-```text
-http://my-macbook:8787/feeds/wired.xml
-```
-
-如果你配置了多个源，也可以直接导入：
-
-```text
-http://my-macbook:8787/opml.xml
-```
-
-### 7. 推荐的 macOS 运行习惯
-
-为了让家里服务更稳定，建议：
-
-- Tailscale 设置为登录后自动连接
-- Docker Desktop 设置为开机自动启动
-- Mac 不要自动休眠
-- 如果合盖会休眠，尽量保持外接电源并关闭自动睡眠
-
-这样 Reeder 拉取 feed 时，不会因为家里电脑离线而失败。
-
-## Tailscale
-
-推荐方式是让家里的电脑和手机都加入同一个 tailnet，然后直接在 Reeder 里订阅：
-
-- `http://你的机器名:8787/feeds/wired.xml`
-
-如果你管理了多个源，可以：
-
-- 在 `/admin` 页面里逐个复制 feed 地址
-- 或直接导出 `/opml.xml`，再导入阅读器
-
-使用建议：
-
-- 电脑端开启 Tailscale 并保持在线
-- 手机端安装 Tailscale 并登录同一账号
-- 在 Reeder 中添加上面的 feed 地址
-- 点开文章后，使用 Reeder 内置网页翻译
 
 ## 常用环境变量
 
 - `APP_BASE_URL`
-  用于生成 RSS 中的文章链接，家庭部署建议设成 Tailscale 地址
+  用于生成 RSS 和文章页链接
+- `DEFAULT_FEED_NAME`
+  默认种子源名称
+- `DEFAULT_FEED_URL`
+  默认种子源地址
 - `DEFAULT_FEED_FOLDER`
-  第一次启动自动种入默认源时使用的目录名
+  默认种子源目录
 - `REFRESH_INTERVAL_MINUTES`
-  定时刷新间隔，默认 `30`
+  自动刷新间隔，默认 `30`
 - `REFRESH_ON_BOOT`
   启动时是否立即刷新，默认 `true`
 - `MAX_ITEMS_PER_REFRESH`
   每次刷新最多处理多少条，默认 `10`
 - `MAX_ITEMS_PER_FEED`
-  RSS 输出最多保留多少条，默认 `50`
+  输出 feed 最多保留多少条，默认 `50`
+- `HTTP_TIMEOUT_MS`
+  上游抓取超时
 - `UPSTREAM_PROXY_URL`
-  给 RSS 抓取和文章正文抓取统一走代理；适合 `NYTimes` 这类在当前网络下 TLS 直连失败的源
+  给 RSS 抓取和文章页抓取统一走代理，支持 `http://` 和 `socks5://`
 
 ## 当前限制
 
-- 某些站点的正文提取可能需要站点级规则
-- 现在只做了单进程定时刷新，适合个人自用
+- 某些站点会拦截正文页抓取，可能返回 `401` 或 `403`
+- 某些站点只适合摘要模式，不适合全文抓取
+- 少数站点可能需要站点级规则或浏览器抓取回退
+- 当前是单进程服务，适合个人或家庭自用
+
+---
+
+## English
+
+NewRSS is a self-hosted Reader View tool for RSS readers such as `Reeder`.
+
+It pulls original RSS feeds, fetches article pages, extracts readable content with Readability, and republishes a cleaner RSS feed for your reader. Each item points to a reader-friendly page hosted by this service, so you can open it in your RSS app and use built-in webpage translation if needed.
+
+## Features
+
+- Multi-feed management
+- Folder grouping
+- OPML import
+- OPML export
+- Automatic refresh
+- Refresh error visibility
+- Proxy support
+- Self-hosted article pages
+
+## How It Works
+
+The default mode is “extract original content, no server-side translation”:
+
+- RSS item `link` points to a hosted reader page
+- RSS item `content:encoded` contains extracted original HTML
+- The hosted page is designed to work well with in-app webpage translation
+
+## Management Endpoints
+
+- Admin page: `GET /admin`
+- Feed list API: `GET /api/feeds`
+- Create or update a feed: `POST /api/feeds`
+- Delete a feed: `DELETE /api/feeds/:name`
+- Refresh one feed: `POST /api/feeds/:name/refresh`
+- Import OPML: `POST /api/opml/import`
+- Export OPML: `GET /opml.xml`
+
+## Quick Start
+
+### Run locally
+
+```bash
+npm install
+npm start
+```
+
+Default endpoints:
+
+- Admin page: `http://localhost:8787/admin`
+- Default feed: `http://localhost:8787/feeds/wired.xml`
+
+Manual first refresh:
+
+```bash
+curl "http://localhost:8787/refresh?name=wired&url=https://www.wired.com/feed/rss"
+```
+
+### Docker Compose
+
+1. Prepare environment variables
+
+```bash
+cp .env.example .env
+```
+
+2. Start the service
+
+```bash
+docker compose up -d --build
+```
+
+3. Verify
+
+```bash
+curl http://localhost:8787/admin
+curl http://localhost:8787/api/feeds
+curl http://localhost:8787/opml.xml
+```
+
+## Home Deployment
+
+For a home Mac deployment, set `APP_BASE_URL` to the real address your phone or reader can reach, for example:
+
+```bash
+APP_BASE_URL=http://your-device-name.sgponte:8787
+```
+
+You can replace it with any reachable private-network address that fits your setup.
+
+## OPML
+
+### Import
+
+The admin page supports uploading an `OPML` file:
+
+- Keep the folder structure from the OPML file
+- Or override everything into a single target folder
+
+Import is deduplicated by `source_url` to avoid duplicate feeds.
+
+### Export
+
+The admin page supports exporting:
+
+- All folders
+- A single folder
+
+You can also call:
+
+```text
+/opml.xml
+/opml.xml?folder=TECH
+```
+
+## Common Environment Variables
+
+- `APP_BASE_URL`
+  Base URL used in generated feed and article links
+- `DEFAULT_FEED_NAME`
+  Default seed feed name
+- `DEFAULT_FEED_URL`
+  Default seed feed URL
+- `DEFAULT_FEED_FOLDER`
+  Default seed folder
+- `REFRESH_INTERVAL_MINUTES`
+  Auto-refresh interval, default `30`
+- `REFRESH_ON_BOOT`
+  Whether to refresh immediately on startup, default `true`
+- `MAX_ITEMS_PER_REFRESH`
+  Max items processed per refresh, default `10`
+- `MAX_ITEMS_PER_FEED`
+  Max items kept in generated feeds, default `50`
+- `HTTP_TIMEOUT_MS`
+  Upstream fetch timeout
+- `UPSTREAM_PROXY_URL`
+  Proxy used for RSS fetches and article-page fetches; supports `http://` and `socks5://`
+
+## Current Limitations
+
+- Some publishers block article-page fetching and may return `401` or `403`
+- Some feeds are only practical in summary mode
+- A few sites may require site-specific rules or browser-based fallback
+- The current runtime model is a single-process service intended for personal or home use
