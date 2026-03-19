@@ -1,0 +1,29 @@
+services:
+  newrss:
+    build: .
+    container_name: newrss
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    env_file:
+      - .env
+    environment:
+      PORT: "${PORT:-8787}"
+      HOST: "0.0.0.0"
+      DB_PATH: "/app/data/newrss.db"
+      APP_BASE_URL: "${APP_BASE_URL:-}"
+      DEFAULT_FEED_NAME: "${DEFAULT_FEED_NAME:-wired}"
+      DEFAULT_FEED_URL: "${DEFAULT_FEED_URL:-https://www.wired.com/feed/rss}"
+      DEFAULT_FEED_FOLDER: "${DEFAULT_FEED_FOLDER:-}"
+      MAX_ITEMS_PER_REFRESH: "${MAX_ITEMS_PER_REFRESH:-10}"
+      MAX_ITEMS_PER_FEED: "${MAX_ITEMS_PER_FEED:-50}"
+      REFRESH_INTERVAL_MINUTES: "${REFRESH_INTERVAL_MINUTES:-30}"
+      REFRESH_ON_BOOT: "${REFRESH_ON_BOOT:-true}"
+      HTTP_TIMEOUT_MS: "${HTTP_TIMEOUT_MS:-15000}"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
