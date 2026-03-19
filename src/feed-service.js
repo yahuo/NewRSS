@@ -1,7 +1,7 @@
 const RSS = require('rss');
 const { resolveArticleContent } = require('./extractor');
 const { withProxy } = require('./http-client');
-const { isoNow, stableGuid, stripHtml, truncate } = require('./utils');
+const { buildFeedNameFromUrl, isoNow, stableGuid, stripHtml, truncate } = require('./utils');
 
 class FeedService {
   constructor({ db, config }) {
@@ -117,19 +117,80 @@ class FeedService {
 
   saveFeed({ name, sourceUrl, folder = '' }) {
     const now = isoNow();
-    const existing = this.db.getFeedByName(name);
+    const existing = this.db.getFeedByName(name) || this.db.getFeedBySourceUrl(sourceUrl);
+    const effectiveName = existing?.name || name;
 
     this.db.upsertFeed({
-      name,
+      name: effectiveName,
       sourceUrl,
       folder,
       title: existing?.title || null,
       lastRefreshedAt: existing?.last_refreshed_at || null,
+      lastRefreshStatus: existing?.last_refresh_status || null,
+      lastRefreshError: existing?.last_refresh_error || null,
       createdAt: existing?.created_at || now,
       updatedAt: now,
     });
 
-    return this.db.getFeedByName(name);
+    return this.db.getFeedByName(effectiveName);
+  }
+
+  importFeeds(feeds, folderOverride = '') {
+    const normalizedOverride = String(folderOverride || '').trim();
+    const imported = [];
+
+    for (const feed of feeds) {
+      const sourceUrl = String(feed.sourceUrl || '').trim();
+      if (!sourceUrl) {
+        continue;
+      }
+
+      let parsedUrl;
+      try {
+        parsedUrl = new URL(sourceUrl);
+      } catch {
+        continue;
+      }
+
+      const title = String(feed.title || '').trim();
+      const name = String(feed.name || '').trim() || buildFeedNameFromUrl(parsedUrl);
+      const folder = normalizedOverride || String(feed.folder || '').trim();
+      const existing = this.db.getFeedByName(name) || this.db.getFeedBySourceUrl(parsedUrl.toString());
+      const saved = this.saveFeed({
+        name: existing?.name || name,
+        sourceUrl: parsedUrl.toString(),
+        folder,
+      });
+
+      if (title && (!existing?.title || existing.title === existing.name)) {
+        const now = isoNow();
+        this.db.upsertFeed({
+          name: saved.name,
+          sourceUrl: saved.source_url,
+          folder: saved.folder || '',
+          title,
+          lastRefreshedAt: saved.last_refreshed_at || null,
+          lastRefreshStatus: saved.last_refresh_status || null,
+          lastRefreshError: saved.last_refresh_error || null,
+          createdAt: saved.created_at || now,
+          updatedAt: now,
+        });
+      }
+
+      imported.push({
+        name: saved.name,
+        sourceUrl: parsedUrl.toString(),
+        folder,
+        existed: Boolean(existing),
+      });
+    }
+
+    return {
+      total: imported.length,
+      created: imported.filter((entry) => !entry.existed).length,
+      updated: imported.filter((entry) => entry.existed).length,
+      feeds: imported,
+    };
   }
 
   deleteFeed(name) {

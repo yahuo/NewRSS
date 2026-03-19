@@ -88,6 +88,11 @@ function renderAdminPage({ feeds, baseUrl }) {
         margin: 0 0 12px;
         font-size: 1.2rem;
       }
+      .section-divider {
+        margin: 18px 0;
+        border: 0;
+        border-top: 1px solid var(--line);
+      }
       .stack {
         display: grid;
         gap: 12px;
@@ -246,6 +251,21 @@ function renderAdminPage({ feeds, baseUrl }) {
             <div class="hint">名称为空时，会根据 URL 自动生成一个 slug。同名保存会更新地址和目录。</div>
             <div class="status" id="status"></div>
           </form>
+          <hr class="section-divider" />
+          <h2>导入 OPML</h2>
+          <form id="opml-form" class="stack">
+            <label>
+              OPML 文件
+              <input name="opmlFile" type="file" accept=".opml,.xml,text/xml,application/xml" required />
+            </label>
+            <label>
+              覆盖目录
+              <input name="folder" placeholder="留空则使用 OPML 中的目录" />
+            </label>
+            <button class="primary" type="submit">导入 OPML</button>
+            <div class="hint">如果填写目录，导入的所有源都会进入这个目录；如果留空，就按 OPML 自带的目录结构导入。</div>
+            <div class="status" id="opml-status"></div>
+          </form>
         </aside>
 
         <main class="card">
@@ -260,6 +280,8 @@ function renderAdminPage({ feeds, baseUrl }) {
       const root = document.getElementById('feed-root');
       const form = document.getElementById('feed-form');
       const status = document.getElementById('status');
+      const opmlForm = document.getElementById('opml-form');
+      const opmlStatus = document.getElementById('opml-status');
 
       render(initialFeeds);
 
@@ -288,6 +310,38 @@ function renderAdminPage({ feeds, baseUrl }) {
           await reload();
         } catch (error) {
           setStatus(error.message);
+        }
+      });
+
+      opmlForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const formData = new FormData(opmlForm);
+        const file = formData.get('opmlFile');
+        const folder = String(formData.get('folder') || '').trim();
+
+        if (!(file instanceof File) || !file.size) {
+          setOpmlStatus('请选择一个 OPML 文件');
+          return;
+        }
+
+        try {
+          setOpmlStatus('正在导入…');
+          const opmlXml = await file.text();
+          const response = await fetch('/api/opml/import', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ opmlXml, folder }),
+          });
+          const data = await response.json();
+          if (!response.ok || !data.ok) {
+            throw new Error(data.error || '导入失败');
+          }
+
+          opmlForm.reset();
+          setOpmlStatus(\`已导入 \${data.result.total} 个源，新建 \${data.result.created} 个，更新 \${data.result.updated} 个\`);
+          await reload();
+        } catch (error) {
+          setOpmlStatus(error.message);
         }
       });
 
@@ -379,6 +433,10 @@ function renderAdminPage({ feeds, baseUrl }) {
 
       function setStatus(message) {
         status.textContent = message || '';
+      }
+
+      function setOpmlStatus(message) {
+        opmlStatus.textContent = message || '';
       }
 
       function renderErrors(feed) {

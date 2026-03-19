@@ -28,9 +28,10 @@
 - 源列表 API：`/api/feeds`
 - 单源刷新 API：`POST /api/feeds/:name/refresh`
 - 删除源 API：`DELETE /api/feeds/:name`
+- OPML 导入 API：`POST /api/opml/import`
 - OPML 导出：`/opml.xml`
 
-源支持一个 `folder` 字段，管理页会按目录分组显示，导出的 OPML 也会按目录分组。
+源支持一个 `folder` 字段，管理页会按目录分组显示，导出的 OPML 也会按目录分组。管理页也支持导入 OPML；你可以选择覆盖到指定目录，或者保留 OPML 原有目录结构。
 
 ## 本地运行
 

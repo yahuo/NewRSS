@@ -4,6 +4,8 @@ const config = require('./config');
 const Database = require('./db');
 const FeedService = require('./feed-service');
 const { renderAdminPage } = require('./admin-page');
+const { parseOpml } = require('./opml');
+const { buildFeedNameFromUrl: buildFeedNameFromUrlUtil } = require('./utils');
 
 const db = new Database(config.dbPath);
 const feedService = new FeedService({ db, config });
@@ -15,7 +17,7 @@ const parser = new Parser({
 });
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: false }));
 
 app.get('/', (request, response) => {
@@ -84,6 +86,37 @@ app.post('/api/feeds', (request, response) => {
     response.status(201).json({
       ok: true,
       feed: mapFeedForResponse(saved, request),
+    });
+  } catch (error) {
+    response.status(400).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post('/api/opml/import', (request, response) => {
+  try {
+    const opmlXml = String(request.body.opmlXml || '').trim();
+    const folderOverride = String(request.body.folder || '').trim();
+
+    if (!opmlXml) {
+      throw new Error('opmlXml is required');
+    }
+
+    const outlines = parseOpml(opmlXml);
+    if (!outlines.length) {
+      throw new Error('OPML contains no feeds');
+    }
+
+    const result = feedService.importFeeds(outlines, folderOverride);
+    if (!result.total) {
+      throw new Error('OPML contains no valid feed URLs');
+    }
+
+    response.status(201).json({
+      ok: true,
+      result,
     });
   } catch (error) {
     response.status(400).json({
@@ -402,12 +435,7 @@ function normalizeFeedPayload(body) {
 }
 
 function buildFeedNameFromUrl(parsedUrl) {
-  const seed = `${parsedUrl.hostname}${parsedUrl.pathname}`
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-
-  return seed.slice(0, 64) || 'feed';
+  return buildFeedNameFromUrlUtil(parsedUrl);
 }
 
 function mapFeedForResponse(feed, request) {

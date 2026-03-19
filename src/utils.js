@@ -32,11 +32,21 @@ const stableGuid = (item) => {
   return hashText(String(rawGuid));
 };
 
+const buildFeedNameFromUrl = (input) => {
+  const parsedUrl = input instanceof URL ? input : new URL(String(input));
+  const seed = `${parsedUrl.hostname}${parsedUrl.pathname}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return seed.slice(0, 64) || 'feed';
+};
+
 module.exports = {
+  buildFeedNameFromUrl,
   hashText,
   isoNow,
   stableGuid,
   stripHtml,
   truncate,
 };
-

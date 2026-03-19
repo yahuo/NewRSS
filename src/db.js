@@ -60,6 +60,13 @@ class Database {
       WHERE name = ?
     `);
 
+    this.getFeedBySourceUrlStmt = this.db.prepare(`
+      SELECT *
+      FROM feeds
+      WHERE source_url = ?
+      LIMIT 1
+    `);
+
     this.listFeedsStmt = this.db.prepare(`
       SELECT
         feeds.*,
@@ -195,6 +202,10 @@ class Database {
 
   getFeedByName(name) {
     return this.getFeedByNameStmt.get(name);
+  }
+
+  getFeedBySourceUrl(sourceUrl) {
+    return this.getFeedBySourceUrlStmt.get(sourceUrl);
   }
 
   listFeeds() {
