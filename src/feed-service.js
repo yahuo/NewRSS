@@ -1,5 +1,6 @@
 const RSS = require('rss');
 const { resolveArticleContent } = require('./extractor');
+const { withProxy } = require('./http-client');
 const { isoNow, stableGuid, stripHtml, truncate } = require('./utils');
 
 class FeedService {
@@ -27,6 +28,7 @@ class FeedService {
           accept: 'application/rss+xml, application/xml, text/xml',
         },
         signal: controller.signal,
+        ...withProxy(this.config.upstreamProxyUrl),
       });
 
       if (!response.ok) {
@@ -141,6 +143,7 @@ class FeedService {
         const resolved = await resolveArticleContent(item, {
           timeoutMs: this.config.httpTimeoutMs,
           userAgent: this.config.userAgent,
+          upstreamProxyUrl: this.config.upstreamProxyUrl,
         });
 
         const sourceTitle = item.title || resolved.title || item.link || 'Untitled';

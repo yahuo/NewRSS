@@ -21,6 +21,7 @@ const config = {
   httpTimeoutMs: toInteger(process.env.HTTP_TIMEOUT_MS, 15000),
   refreshOnBoot: process.env.REFRESH_ON_BOOT !== 'false',
   userAgent: process.env.USER_AGENT || 'NewRSS/0.1 (+https://tailscale.local)',
+  upstreamProxyUrl: process.env.UPSTREAM_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '',
 };
 
 module.exports = config;

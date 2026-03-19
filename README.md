@@ -129,6 +129,14 @@ APP_BASE_URL=http://my-macbook:8787
 DEFAULT_FEED_FOLDER=News
 ```
 
+如果某些国外源在你家网络里直连失败，比如 `NYTimes`，可以额外配置上游代理：
+
+```bash
+UPSTREAM_PROXY_URL=http://host.containers.internal:7890
+```
+
+也支持 `socks5://` 地址。
+
 ### 4. 启动服务
 
 ```bash
@@ -209,6 +217,8 @@ http://my-macbook:8787/opml.xml
   每次刷新最多处理多少条，默认 `10`
 - `MAX_ITEMS_PER_FEED`
   RSS 输出最多保留多少条，默认 `50`
+- `UPSTREAM_PROXY_URL`
+  给 RSS 抓取和文章正文抓取统一走代理；适合 `NYTimes` 这类在当前网络下 TLS 直连失败的源
 
 ## 当前限制
 

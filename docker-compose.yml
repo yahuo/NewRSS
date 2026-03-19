@@ -20,6 +20,7 @@ services:
       REFRESH_INTERVAL_MINUTES: "${REFRESH_INTERVAL_MINUTES:-30}"
       REFRESH_ON_BOOT: "${REFRESH_ON_BOOT:-true}"
       HTTP_TIMEOUT_MS: "${HTTP_TIMEOUT_MS:-15000}"
+      UPSTREAM_PROXY_URL: "${UPSTREAM_PROXY_URL:-}"
     volumes:
       - ./data:/app/data
     healthcheck:

@@ -1,5 +1,6 @@
 const { JSDOM, VirtualConsole } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
+const { withProxy } = require('./http-client');
 const { stripHtml } = require('./utils');
 
 const MIN_CONTENT_TEXT_LENGTH = 280;
@@ -235,6 +236,7 @@ const fetchHtml = async (url, options) => {
       },
       redirect: 'follow',
       signal: controller.signal,
+      ...withProxy(options.upstreamProxyUrl),
     });
 
     if (!response.ok) {
