@@ -123,7 +123,7 @@ app.post('/api/feeds/:name/refresh', async (request, response) => {
       result,
     });
   } catch (error) {
-    response.status(404).json({
+    response.status(error.message.includes('not found') ? 404 : 500).json({
       ok: false,
       error: error.message,
     });
@@ -327,9 +327,12 @@ function mapFeedForResponse(feed, request) {
     folder: feed.folder || '',
     title: feed.title || feed.name,
     lastRefreshedAt: feed.last_refreshed_at,
+    lastRefreshStatus: feed.last_refresh_status || 'idle',
+    lastRefreshError: feed.last_refresh_error || '',
     createdAt: feed.created_at,
     updatedAt: feed.updated_at,
     entryCount: feed.entry_count || 0,
+    errorCount: feed.error_count || 0,
     feedUrl: `${baseUrl}/feeds/${encodeURIComponent(feed.name)}.xml`,
   };
 }

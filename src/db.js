@@ -16,6 +16,8 @@ class Database {
         folder TEXT,
         title TEXT,
         last_refreshed_at TEXT,
+        last_refresh_status TEXT,
+        last_refresh_error TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -44,11 +46,11 @@ class Database {
       );
     `);
 
-    this.ensureFeedFolderColumn();
+    this.ensureFeedSchema();
 
-    this.touchFeedRefreshStmt = this.db.prepare(`
+    this.setFeedRefreshResultStmt = this.db.prepare(`
       UPDATE feeds
-      SET last_refreshed_at = ?, updated_at = ?
+      SET last_refreshed_at = ?, last_refresh_status = ?, last_refresh_error = ?, updated_at = ?
       WHERE name = ?
     `);
 
@@ -65,7 +67,12 @@ class Database {
           SELECT COUNT(*)
           FROM entries
           WHERE entries.feed_name = feeds.name
-        ) AS entry_count
+        ) AS entry_count,
+        (
+          SELECT COUNT(*)
+          FROM entries
+          WHERE entries.feed_name = feeds.name AND entries.refresh_status = 'error'
+        ) AS error_count
       FROM feeds
       ORDER BY COALESCE(feeds.folder, '') ASC, feeds.created_at ASC, feeds.name ASC
     `);
@@ -127,23 +134,44 @@ class Database {
       WHERE id = ?
     `);
 
+    this.listRecentEntryErrorsByFeedStmt = this.db.prepare(`
+      SELECT id, source_title, source_url, refresh_error, refreshed_at
+      FROM entries
+      WHERE feed_name = ? AND refresh_status = 'error'
+      ORDER BY refreshed_at DESC, id DESC
+      LIMIT ?
+    `);
+
     this.upsertFeedStmt = this.db.prepare(`
-      INSERT INTO feeds (name, source_url, folder, title, last_refreshed_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO feeds (name, source_url, folder, title, last_refreshed_at, last_refresh_status, last_refresh_error, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(name) DO UPDATE SET
         source_url = excluded.source_url,
         folder = excluded.folder,
         title = COALESCE(excluded.title, feeds.title),
+        last_refreshed_at = COALESCE(excluded.last_refreshed_at, feeds.last_refreshed_at),
+        last_refresh_status = COALESCE(excluded.last_refresh_status, feeds.last_refresh_status),
+        last_refresh_error = COALESCE(excluded.last_refresh_error, feeds.last_refresh_error),
         updated_at = excluded.updated_at
     `);
   }
 
-  ensureFeedFolderColumn() {
+  ensureFeedSchema() {
     const columns = this.db.prepare(`PRAGMA table_info(feeds)`).all();
     const hasFolder = columns.some((column) => column.name === 'folder');
+    const hasLastRefreshStatus = columns.some((column) => column.name === 'last_refresh_status');
+    const hasLastRefreshError = columns.some((column) => column.name === 'last_refresh_error');
 
     if (!hasFolder) {
       this.db.exec(`ALTER TABLE feeds ADD COLUMN folder TEXT;`);
+    }
+
+    if (!hasLastRefreshStatus) {
+      this.db.exec(`ALTER TABLE feeds ADD COLUMN last_refresh_status TEXT;`);
+    }
+
+    if (!hasLastRefreshError) {
+      this.db.exec(`ALTER TABLE feeds ADD COLUMN last_refresh_error TEXT;`);
     }
   }
 
@@ -154,13 +182,15 @@ class Database {
       feed.folder || null,
       feed.title || null,
       feed.lastRefreshedAt || null,
+      feed.lastRefreshStatus || null,
+      feed.lastRefreshError || null,
       feed.createdAt,
       feed.updatedAt
     );
   }
 
-  touchFeedRefresh(name, refreshedAt) {
-    this.touchFeedRefreshStmt.run(refreshedAt, refreshedAt, name);
+  setFeedRefreshResult(name, refreshedAt, status, error) {
+    this.setFeedRefreshResultStmt.run(refreshedAt, status || null, error || null, refreshedAt, name);
   }
 
   getFeedByName(name) {
@@ -203,6 +233,10 @@ class Database {
 
   getEntryById(id) {
     return this.getEntryByIdStmt.get(id);
+  }
+
+  listRecentEntryErrorsByFeed(feedName, limit = 3) {
+    return this.listRecentEntryErrorsByFeedStmt.all(feedName, limit);
   }
 }
 

@@ -98,9 +98,19 @@ class FeedService {
       folder: feed.folder || '',
       title: feed.title || feed.name,
       lastRefreshedAt: feed.last_refreshed_at,
+      lastRefreshStatus: feed.last_refresh_status || 'idle',
+      lastRefreshError: feed.last_refresh_error || '',
       createdAt: feed.created_at,
       updatedAt: feed.updated_at,
       entryCount: feed.entry_count,
+      errorCount: feed.error_count || 0,
+      recentEntryErrors: this.db.listRecentEntryErrorsByFeed(feed.name, 3).map((entry) => ({
+        id: entry.id,
+        title: entry.source_title || 'Untitled',
+        sourceUrl: entry.source_url,
+        refreshedAt: entry.refreshed_at,
+        error: entry.refresh_error || '',
+      })),
       feedUrl: `${baseUrl}/feeds/${encodeURIComponent(feed.name)}.xml`,
     }));
   }
@@ -127,7 +137,17 @@ class FeedService {
   }
 
   async refreshFeed({ parser, feedName, sourceUrl }) {
-    const parsedFeed = await this.parseSourceFeed(parser, sourceUrl);
+    this.ensureFeed(feedName, sourceUrl, null);
+
+    let parsedFeed;
+    try {
+      parsedFeed = await this.parseSourceFeed(parser, sourceUrl);
+    } catch (error) {
+      const refreshedAt = isoNow();
+      this.db.setFeedRefreshResult(feedName, refreshedAt, 'error', error.message);
+      throw error;
+    }
+
     this.ensureFeed(feedName, sourceUrl, parsedFeed.title || feedName);
 
     const refreshedAt = isoNow();
@@ -203,13 +223,24 @@ class FeedService {
       }
     }
 
-    this.db.touchFeedRefresh(feedName, refreshedAt);
+    const itemErrors = results.filter((item) => item.status === 'error');
+    const feedStatus = itemErrors.length ? 'partial' : 'ok';
+    const feedError = itemErrors.length
+      ? itemErrors
+          .slice(0, 3)
+          .map((item) => `${item.title}: ${item.error}`)
+          .join(' | ')
+      : '';
+
+    this.db.setFeedRefreshResult(feedName, refreshedAt, feedStatus, feedError);
 
     return {
       feedName,
       sourceUrl,
       sourceTitle: parsedFeed.title || feedName,
       refreshedAt,
+      status: feedStatus,
+      error: feedError,
       items: results,
     };
   }
@@ -243,6 +274,8 @@ class FeedService {
           feedName: feed.name,
           ok: true,
           refreshedAt: result.refreshedAt,
+          status: result.status,
+          error: result.error,
           itemCount: result.items.length,
         });
       } catch (error) {

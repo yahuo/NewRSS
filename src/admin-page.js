@@ -152,6 +152,14 @@ function renderAdminPage({ feeds, baseUrl }) {
         color: var(--accent);
         font-size: 0.82rem;
       }
+      .pill.warn {
+        background: rgba(185, 109, 22, 0.14);
+        color: #a15812;
+      }
+      .pill.danger {
+        background: rgba(154, 47, 47, 0.12);
+        color: var(--danger);
+      }
       .meta {
         display: grid;
         gap: 4px;
@@ -168,6 +176,31 @@ function renderAdminPage({ feeds, baseUrl }) {
         flex-wrap: wrap;
         gap: 8px;
         margin-top: 12px;
+      }
+      .errors {
+        display: grid;
+        gap: 8px;
+        margin-top: 14px;
+      }
+      .error-box {
+        border-radius: 14px;
+        padding: 12px 14px;
+        background: rgba(154, 47, 47, 0.08);
+        border: 1px solid rgba(154, 47, 47, 0.16);
+        color: #6f2c2c;
+        line-height: 1.55;
+      }
+      .error-box strong {
+        display: block;
+        margin-bottom: 4px;
+        color: var(--danger);
+      }
+      .error-list {
+        margin: 0;
+        padding-left: 18px;
+      }
+      .error-list li + li {
+        margin-top: 6px;
       }
       .empty {
         color: var(--muted);
@@ -282,22 +315,36 @@ function renderAdminPage({ feeds, baseUrl }) {
             <h3>\${escapeHtml(folder)}</h3>
             <div class="feed-list">
               \${items.map((feed) => {
+                const statusClass = feed.lastRefreshStatus === 'error'
+                  ? 'pill danger'
+                  : feed.lastRefreshStatus === 'partial'
+                    ? 'pill warn'
+                    : 'pill';
+                const statusText = feed.lastRefreshStatus === 'error'
+                  ? '源失败'
+                  : feed.lastRefreshStatus === 'partial'
+                    ? '部分失败'
+                    : feed.lastRefreshStatus === 'ok'
+                      ? '正常'
+                      : '未刷新';
                 return \`<article class="feed-item">
                   <header>
                     <strong>\${escapeHtml(feed.title)}</strong>
-                    <span class="pill">\${feed.entryCount} 篇</span>
+                    <span class="\${statusClass}">\${statusText}</span>
                   </header>
                   <div class="meta">
                     <div>名称：\${escapeHtml(feed.name)}</div>
                     <div>源地址：<a href="\${escapeHtml(feed.sourceUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.sourceUrl)}</a></div>
                     <div>Feed：<a href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.feedUrl)}</a></div>
                     <div>最近刷新：\${escapeHtml(feed.lastRefreshedAt || '未刷新')}</div>
+                    <div>已抓取：\${Number(feed.entryCount || 0)} 篇，最近失败：\${Number(feed.errorCount || 0)} 篇</div>
                   </div>
                   <div class="row-actions">
                     <button type="button" data-action="refresh" data-name="\${escapeHtml(feed.name)}">刷新</button>
                     <a class="button-like" href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">查看 Feed</a>
                     <button class="danger" type="button" data-action="delete" data-name="\${escapeHtml(feed.name)}">删除</button>
                   </div>
+                  \${renderErrors(feed)}
                 </article>\`;
               }).join('')}
             </div>
@@ -332,6 +379,24 @@ function renderAdminPage({ feeds, baseUrl }) {
 
       function setStatus(message) {
         status.textContent = message || '';
+      }
+
+      function renderErrors(feed) {
+        const blocks = [];
+
+        if (feed.lastRefreshError) {
+          blocks.push(\`<div class="error-box"><strong>最近一次源级错误</strong><div>\${escapeHtml(feed.lastRefreshError)}</div></div>\`);
+        }
+
+        if (Array.isArray(feed.recentEntryErrors) && feed.recentEntryErrors.length) {
+          blocks.push(\`<div class="error-box"><strong>最近文章抓取失败</strong><ol class="error-list">\${feed.recentEntryErrors.map((entry) => \`<li><div>\${escapeHtml(entry.title)}</div><div>\${escapeHtml(entry.error || '未知错误')}</div><div>\${escapeHtml(entry.refreshedAt || '')}</div><div><a href="\${escapeHtml(entry.sourceUrl)}" target="_blank" rel="noreferrer">查看原文</a></div></li>\`).join('')}</ol></div>\`);
+        }
+
+        if (!blocks.length) {
+          return '';
+        }
+
+        return \`<div class="errors">\${blocks.join('')}</div>\`;
       }
 
       function escapeHtml(value) {
