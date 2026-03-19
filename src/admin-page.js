@@ -1,4 +1,4 @@
-function renderAdminPage({ feeds, baseUrl }) {
+function renderAdminPage({ feeds, folders = [], baseUrl }) {
   return `<!doctype html>
 <html lang="zh-CN">
   <head>
@@ -47,12 +47,7 @@ function renderAdminPage({ feeds, baseUrl }) {
         max-width: 760px;
         line-height: 1.7;
       }
-      .actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-      }
-      .actions a, button, .button-like {
+      button, .button-like {
         border: 1px solid var(--line);
         background: var(--panel);
         color: var(--ink);
@@ -102,7 +97,7 @@ function renderAdminPage({ feeds, baseUrl }) {
         gap: 6px;
         font-size: 0.95rem;
       }
-      input {
+      input, select {
         width: 100%;
         padding: 10px 12px;
         border-radius: 12px;
@@ -225,10 +220,6 @@ function renderAdminPage({ feeds, baseUrl }) {
       <section class="hero">
         <h1>NewRSS Feed 管理</h1>
         <p>维护你的源列表，按目录组织输出，并导出 OPML 给 Reeder 等阅读器。每个源会生成一个 reader-view feed，文章链接会落到本服务托管的正文页。</p>
-        <div class="actions">
-          <a href="${escapeHtml(baseUrl)}/opml.xml">导出 OPML</a>
-          <a href="${escapeHtml(baseUrl)}/healthz">健康检查</a>
-        </div>
       </section>
 
       <section class="layout">
@@ -250,6 +241,19 @@ function renderAdminPage({ feeds, baseUrl }) {
             <button class="primary" type="submit">保存源</button>
             <div class="hint">名称为空时，会根据 URL 自动生成一个 slug。同名保存会更新地址和目录。</div>
             <div class="status" id="status"></div>
+          </form>
+          <hr class="section-divider" />
+          <h2>导出 OPML</h2>
+          <form id="export-form" class="stack">
+            <label>
+              导出目录
+              <select name="folder">
+                <option value="">全部目录</option>
+                ${folders.map((folder) => `<option value="${escapeHtml(folder)}">${escapeHtml(folder)}</option>`).join('')}
+              </select>
+            </label>
+            <button class="primary" type="submit">导出 OPML</button>
+            <div class="hint">不选目录时导出全部源；选择目录后只导出该目录下的源。</div>
           </form>
           <hr class="section-divider" />
           <h2>导入 OPML</h2>
@@ -279,6 +283,7 @@ function renderAdminPage({ feeds, baseUrl }) {
       const initialFeeds = ${safeJson(feeds)};
       const root = document.getElementById('feed-root');
       const form = document.getElementById('feed-form');
+      const exportForm = document.getElementById('export-form');
       const status = document.getElementById('status');
       const opmlForm = document.getElementById('opml-form');
       const opmlStatus = document.getElementById('opml-status');
@@ -311,6 +316,19 @@ function renderAdminPage({ feeds, baseUrl }) {
         } catch (error) {
           setStatus(error.message);
         }
+      });
+
+      exportForm.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const formData = new FormData(exportForm);
+        const folder = String(formData.get('folder') || '').trim();
+        const url = new URL('/opml.xml', window.location.origin);
+
+        if (folder) {
+          url.searchParams.set('folder', folder);
+        }
+
+        window.location.href = url.toString();
       });
 
       opmlForm.addEventListener('submit', async (event) => {

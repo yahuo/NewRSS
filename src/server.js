@@ -165,9 +165,11 @@ app.post('/api/feeds/:name/refresh', async (request, response) => {
 
 app.get('/admin', (request, response) => {
   feedService.ensureBootstrapFeed();
+  const feeds = feedService.listFeeds(request);
   response.type('text/html; charset=utf-8').send(
     renderAdminPage({
-      feeds: feedService.listFeeds(request),
+      feeds,
+      folders: Array.from(new Set(feeds.map((feed) => feed.folder).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
       baseUrl: config.appBaseUrl || `${request.protocol}://${request.get('host')}`,
     })
   );
@@ -175,7 +177,9 @@ app.get('/admin', (request, response) => {
 
 app.get('/opml.xml', (request, response) => {
   feedService.ensureBootstrapFeed();
-  response.type('text/x-opml; charset=utf-8').send(feedService.renderOpml({ request }));
+  response
+    .type('text/x-opml; charset=utf-8')
+    .send(feedService.renderOpml({ request, folder: request.query.folder || '' }));
 });
 
 app.get('/feeds/:name.xml', (request, response) => {

@@ -395,8 +395,11 @@ class FeedService {
     return rss.xml({ indent: true });
   }
 
-  renderOpml({ request }) {
-    const feeds = this.listFeeds(request);
+  renderOpml({ request, folder = '' }) {
+    const normalizedFolder = normalizeFolderPath(folder);
+    const feeds = this.listFeeds(request).filter((feed) =>
+      normalizedFolder ? feed.folder === normalizedFolder : true
+    );
     const grouped = new Map();
 
     for (const feed of feeds) {
@@ -424,10 +427,12 @@ class FeedService {
       }
     }
 
+    const title = normalizedFolder ? `NewRSS Exports - ${escapeXml(normalizedFolder)}` : 'NewRSS Exports';
+
     return `<?xml version="1.0" encoding="UTF-8"?>
 <opml version="2.0">
   <head>
-    <title>NewRSS Exports</title>
+    <title>${title}</title>
   </head>
   <body>
 ${outlines.join('\n')}
