@@ -180,64 +180,156 @@ app.get('/articles/:id', (request, response) => {
     <style>
       :root {
         color-scheme: light;
-        --bg: #f8f5ef;
-        --card: #fffdf8;
+        --bg: #fbf8f1;
         --ink: #1d1b17;
-        --muted: #716959;
-        --line: #e4dccd;
+        --muted: #7a715f;
+        --line: rgba(115, 104, 84, 0.18);
         --link: #0e5ea8;
+      }
+      * {
+        box-sizing: border-box;
       }
       body {
         margin: 0;
-        padding: 32px 16px;
-        background: radial-gradient(circle at top, #fffaf0 0%, var(--bg) 55%);
+        background: linear-gradient(180deg, #fdfaf4 0%, var(--bg) 18%, #f7f2e8 100%);
         color: var(--ink);
         font-family: Georgia, "Songti SC", "Noto Serif CJK SC", serif;
       }
-      main {
-        max-width: 820px;
+      .page {
+        width: min(920px, calc(100vw - 28px));
         margin: 0 auto;
-        background: var(--card);
-        border: 1px solid var(--line);
-        border-radius: 18px;
-        padding: 32px;
-        box-shadow: 0 16px 48px rgba(75, 54, 18, 0.08);
+        padding: 24px 0 56px;
+      }
+      header {
+        padding: 0 0 20px;
+        margin-bottom: 22px;
+        border-bottom: 1px solid var(--line);
+      }
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 14px;
+        font: 600 0.78rem/1.2 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .eyebrow::before {
+        content: "";
+        width: 22px;
+        height: 1px;
+        background: currentColor;
+      }
+      main {
+        max-width: 100%;
+        margin: 0 auto;
       }
       h1 {
-        margin: 0 0 12px;
-        font-size: clamp(2rem, 4vw, 3rem);
-        line-height: 1.08;
+        margin: 0 0 14px;
+        font-size: clamp(2.35rem, 7vw, 4.4rem);
+        line-height: 0.94;
+        letter-spacing: -0.03em;
+        text-wrap: balance;
       }
       .meta {
+        display: grid;
+        gap: 6px;
         color: var(--muted);
-        margin-bottom: 24px;
+        font: 0.98rem/1.55 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
       .meta a {
         color: var(--link);
+        word-break: break-word;
+      }
+      .meta-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .meta-label {
+        min-width: 72px;
+        color: rgba(29, 27, 23, 0.72);
       }
       article {
-        font-size: 1.125rem;
-        line-height: 1.82;
+        font-size: clamp(1.24rem, 2vw, 1.42rem);
+        line-height: 1.88;
+      }
+      article > :first-child {
+        margin-top: 0;
+      }
+      article p,
+      article ul,
+      article ol,
+      article blockquote,
+      article h2,
+      article h3,
+      article h4,
+      article figure {
+        margin-top: 0;
+        margin-bottom: 1.22em;
+      }
+      article h2,
+      article h3,
+      article h4 {
+        line-height: 1.15;
+        margin-top: 1.5em;
+      }
+      article figure {
+        margin-left: 0;
+        margin-right: 0;
+      }
+      article figcaption {
+        margin-top: 8px;
+        color: var(--muted);
+        font: 0.9rem/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
       article img {
+        display: block;
+        width: 100%;
         max-width: 100%;
         height: auto;
+        border-radius: 10px;
       }
       article a {
         color: var(--link);
       }
+      @media (max-width: 720px) {
+        .page {
+          width: min(100vw - 22px, 920px);
+          padding-top: 18px;
+          padding-bottom: 40px;
+        }
+        header {
+          margin-bottom: 18px;
+          padding-bottom: 18px;
+        }
+        h1 {
+          font-size: clamp(2rem, 11vw, 3.6rem);
+          line-height: 0.98;
+        }
+        article {
+          font-size: 1.18rem;
+          line-height: 1.78;
+        }
+      }
     </style>
   </head>
   <body>
-    <main>
-      <h1>${escapeHtml(title)}</h1>
-      <div class="meta">
-        原文：<a href="${escapeAttribute(entry.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(entry.source_url)}</a><br />
-        正文来源：${escapeHtml(contentSource)}<br />
-        状态：${escapeHtml(entry.refresh_status)}
-      </div>
-      <article>${contentHtml}</article>
-    </main>
+    <div class="page">
+      <header>
+        <div class="eyebrow">Reader View</div>
+        <h1>${escapeHtml(title)}</h1>
+        <div class="meta">
+          <div class="meta-row"><span class="meta-label">原文</span><a href="${escapeAttribute(entry.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(entry.source_url)}</a></div>
+          <div class="meta-row"><span class="meta-label">来源</span><span>${escapeHtml(contentSource)}</span></div>
+          <div class="meta-row"><span class="meta-label">状态</span><span>${escapeHtml(entry.refresh_status)}</span></div>
+        </div>
+      </header>
+      <main>
+        <article>${contentHtml}</article>
+      </main>
+    </div>
   </body>
 </html>`);
 });
