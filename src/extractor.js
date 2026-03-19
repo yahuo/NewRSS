@@ -45,6 +45,157 @@ const sanitizeHtmlForReadability = (html) =>
     .replace(/<style[\s\S]*?<\/style>/gi, '')
     .replace(/<link\b[^>]*rel=["']?stylesheet["']?[^>]*>/gi, '');
 
+const resolveUrl = (value, baseUrl) => {
+  if (!value) {
+    return '';
+  }
+
+  try {
+    return new URL(value, baseUrl).toString();
+  } catch {
+    return value;
+  }
+};
+
+const escapeHtml = (value) =>
+  String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+const findImgSource = (element) => {
+  const src =
+    element.getAttribute('src') ||
+    element.getAttribute('data-src') ||
+    element.getAttribute('data-original') ||
+    '';
+
+  if (src) {
+    return src;
+  }
+
+  const srcset = element.getAttribute('srcset') || element.getAttribute('data-srcset') || '';
+  if (!srcset) {
+    return '';
+  }
+
+  const [firstCandidate] = srcset.split(',');
+  return firstCandidate ? firstCandidate.trim().split(/\s+/)[0] : '';
+};
+
+const buildLeadImageHtml = ({ src, alt = '', caption = '' }) => {
+  if (!src) {
+    return '';
+  }
+
+  const safeSrc = escapeHtml(src);
+  const safeAlt = escapeHtml(alt);
+  const safeCaption = escapeHtml(caption);
+
+  return `<figure data-newrss-lead-image="true"><img src="${safeSrc}" alt="${safeAlt}" loading="eager" />${
+    safeCaption ? `<figcaption>${safeCaption}</figcaption>` : ''
+  }</figure>`;
+};
+
+const extractLeadImageFromHtml = (html, baseUrl) => {
+  if (!html) {
+    return '';
+  }
+
+  const dom = new JSDOM(`<body>${html}</body>`, { url: baseUrl });
+  const { document } = dom.window;
+  const image = document.querySelector('img');
+
+  if (!image) {
+    return '';
+  }
+
+  const src = resolveUrl(findImgSource(image), baseUrl);
+  if (!src) {
+    return '';
+  }
+
+  const alt = image.getAttribute('alt') || '';
+  const caption =
+    image.closest('figure')?.querySelector('figcaption')?.textContent?.trim() ||
+    image.getAttribute('data-caption') ||
+    '';
+
+  return buildLeadImageHtml({ src, alt, caption });
+};
+
+const extractLeadImageFromDocument = (document, baseUrl) => {
+  const metaImageSelectors = [
+    'meta[property="og:image"]',
+    'meta[name="twitter:image"]',
+    'meta[property="twitter:image"]',
+  ];
+
+  for (const selector of metaImageSelectors) {
+    const node = document.querySelector(selector);
+    const src = resolveUrl(node?.getAttribute('content') || '', baseUrl);
+
+    if (src) {
+      const alt =
+        document.querySelector('meta[property="og:image:alt"]')?.getAttribute('content') ||
+        document.querySelector('meta[name="twitter:image:alt"]')?.getAttribute('content') ||
+        document.querySelector('meta[property="twitter:image:alt"]')?.getAttribute('content') ||
+        document.querySelector('meta[property="og:title"]')?.getAttribute('content') ||
+        '';
+
+      return buildLeadImageHtml({ src, alt });
+    }
+  }
+
+  const articleImage = document.querySelector('article img, main img');
+  if (!articleImage) {
+    return '';
+  }
+
+  return buildLeadImageHtml({
+    src: resolveUrl(findImgSource(articleImage), baseUrl),
+    alt: articleImage.getAttribute('alt') || '',
+  });
+};
+
+const hasMeaningfulMedia = (document) => {
+  if (document.querySelector('video, iframe, picture')) {
+    return true;
+  }
+
+  for (const image of document.querySelectorAll('img')) {
+    const width = Number.parseInt(image.getAttribute('width') || '', 10);
+    const height = Number.parseInt(image.getAttribute('height') || '', 10);
+
+    if (!Number.isFinite(width) || !Number.isFinite(height)) {
+      return true;
+    }
+
+    if (width >= 120 || height >= 120) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+const ensureLeadMedia = (html, leadMediaHtml) => {
+  if (!leadMediaHtml || !html) {
+    return html;
+  }
+
+  const dom = new JSDOM(`<body>${html}</body>`);
+  const { document } = dom.window;
+
+  if (hasMeaningfulMedia(document)) {
+    return document.body.innerHTML.trim();
+  }
+
+  document.body.insertAdjacentHTML('afterbegin', leadMediaHtml);
+  return document.body.innerHTML.trim();
+};
+
 const cleanupExtractedHtml = (html) => {
   const dom = new JSDOM(`<body>${html}</body>`);
   const { document } = dom.window;
@@ -103,6 +254,7 @@ const extractFromPage = async (url, options) => {
     url,
     virtualConsole,
   });
+  const fallbackLeadImageHtml = options.fallbackLeadImageHtml || extractLeadImageFromDocument(dom.window.document, url);
   const reader = new Readability(dom.window.document);
   const article = reader.parse();
 
@@ -110,7 +262,7 @@ const extractFromPage = async (url, options) => {
     throw new Error('readability failed to extract article content');
   }
 
-  const cleanedHtml = cleanupExtractedHtml(article.content);
+  const cleanedHtml = ensureLeadMedia(cleanupExtractedHtml(article.content), fallbackLeadImageHtml);
 
   return {
     html: cleanedHtml,
@@ -132,7 +284,15 @@ const resolveArticleContent = async (item, options) => {
     throw new Error('item link missing, cannot fetch article page');
   }
 
-  return extractFromPage(item.link, options);
+  const fallbackLeadImageHtml = extractLeadImageFromHtml(
+    item['content:encoded'] || item.content || item.contentSnippet || '',
+    item.link
+  );
+
+  return extractFromPage(item.link, {
+    ...options,
+    fallbackLeadImageHtml,
+  });
 };
 
 module.exports = {
