@@ -3,12 +3,32 @@ const { Readability } = require('@mozilla/readability');
 const { stripHtml } = require('./utils');
 
 const MIN_CONTENT_TEXT_LENGTH = 280;
+const TRUNCATED_CONTENT_PATTERNS = [
+  /\bread the full story at\b/i,
+  /\bcontinue reading\b/i,
+  /\bread more\b/i,
+  /\bfull article\b/i,
+];
+
+const looksLikeTruncatedContent = (html, text) => {
+  const normalizedText = text.replace(/\s+/g, ' ').trim();
+  const normalizedHtml = html.replace(/\s+/g, ' ').trim();
+  const tailText = normalizedText.slice(-240);
+  const tailHtml = normalizedHtml.slice(-400);
+
+  if (TRUNCATED_CONTENT_PATTERNS.some((pattern) => pattern.test(tailText) || pattern.test(tailHtml))) {
+    return true;
+  }
+
+  return /(?:\u2026|\.{3})\s*$/.test(normalizedText);
+};
 
 const extractEmbeddedContent = (item) => {
   const embedded = item['content:encoded'] || item.content || item.contentSnippet || '';
-  const textLength = stripHtml(embedded).length;
+  const text = stripHtml(embedded);
+  const textLength = text.length;
 
-  if (textLength >= MIN_CONTENT_TEXT_LENGTH) {
+  if (textLength >= MIN_CONTENT_TEXT_LENGTH && !looksLikeTruncatedContent(embedded, text)) {
     return {
       html: embedded,
       textLength,
