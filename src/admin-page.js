@@ -359,9 +359,9 @@ function renderAdminPage({ feeds, baseUrl }) {
 
         const groups = new Map();
         for (const feed of feeds) {
-          const folder = feed.folder || '未分类';
+          const folder = normalizeFolder(feed.folder) || '未分类';
           if (!groups.has(folder)) groups.set(folder, []);
-          groups.get(folder).push(feed);
+          groups.get(folder).push({ ...feed, folder });
         }
 
         root.innerHTML = Array.from(groups.entries()).map(([folder, items]) => {
@@ -464,6 +464,17 @@ function renderAdminPage({ feeds, baseUrl }) {
           .replace(/>/g, '&gt;')
           .replace(/"/g, '&quot;')
           .replace(/'/g, '&#39;');
+      }
+
+      function normalizeFolder(value) {
+        return String(value || '')
+          .normalize('NFKC')
+          .replace(/[\s\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000\uFEFF]+/g, ' ')
+          .replace(/[\\/]+/g, '/')
+          .split('/')
+          .map((segment) => segment.trim())
+          .filter(Boolean)
+          .join('/');
       }
     </script>
   </body>

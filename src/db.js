@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
+const { normalizeFolderPath } = require('./utils');
 
 class Database {
   constructor(dbPath) {
@@ -161,6 +162,14 @@ class Database {
         last_refresh_error = COALESCE(excluded.last_refresh_error, feeds.last_refresh_error),
         updated_at = excluded.updated_at
     `);
+
+    this.normalizeFeedFolderStmt = this.db.prepare(`
+      UPDATE feeds
+      SET folder = ?, updated_at = ?
+      WHERE name = ?
+    `);
+
+    this.normalizeStoredFolders();
   }
 
   ensureFeedSchema() {
@@ -179,6 +188,20 @@ class Database {
 
     if (!hasLastRefreshError) {
       this.db.exec(`ALTER TABLE feeds ADD COLUMN last_refresh_error TEXT;`);
+    }
+  }
+
+  normalizeStoredFolders() {
+    const now = new Date().toISOString();
+    const feeds = this.db.prepare(`SELECT name, folder FROM feeds`).all();
+
+    for (const feed of feeds) {
+      const normalized = normalizeFolderPath(feed.folder || '');
+      const current = feed.folder || '';
+
+      if (normalized !== current) {
+        this.normalizeFeedFolderStmt.run(normalized || null, now, feed.name);
+      }
     }
   }
 

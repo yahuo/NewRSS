@@ -1,7 +1,7 @@
 const RSS = require('rss');
 const { resolveArticleContent } = require('./extractor');
 const { withProxy } = require('./http-client');
-const { buildFeedNameFromUrl, isoNow, stableGuid, stripHtml, truncate } = require('./utils');
+const { buildFeedNameFromUrl, isoNow, normalizeFolderPath, stableGuid, stripHtml, truncate } = require('./utils');
 
 class FeedService {
   constructor({ db, config }) {
@@ -64,7 +64,7 @@ class FeedService {
     this.db.upsertFeed({
       name: this.config.defaultFeedName,
       sourceUrl: this.config.defaultFeedUrl,
-      folder: this.config.defaultFeedFolder || '',
+      folder: normalizeFolderPath(this.config.defaultFeedFolder || ''),
       title: null,
       lastRefreshedAt: null,
       createdAt: now,
@@ -81,7 +81,7 @@ class FeedService {
     this.db.upsertFeed({
       name: feedName,
       sourceUrl,
-      folder: existing?.folder || '',
+      folder: normalizeFolderPath(existing?.folder || ''),
       title: sourceTitle || existing?.title || feedName,
       lastRefreshedAt: existing?.last_refreshed_at || null,
       createdAt: existing?.created_at || now,
@@ -95,7 +95,7 @@ class FeedService {
     return this.db.listFeeds().map((feed) => ({
       name: feed.name,
       sourceUrl: feed.source_url,
-      folder: feed.folder || '',
+      folder: normalizeFolderPath(feed.folder || ''),
       title: feed.title || feed.name,
       lastRefreshedAt: feed.last_refreshed_at,
       lastRefreshStatus: feed.last_refresh_status || 'idle',
@@ -119,11 +119,12 @@ class FeedService {
     const now = isoNow();
     const existing = this.db.getFeedByName(name) || this.db.getFeedBySourceUrl(sourceUrl);
     const effectiveName = existing?.name || name;
+    const normalizedFolder = normalizeFolderPath(folder);
 
     this.db.upsertFeed({
       name: effectiveName,
       sourceUrl,
-      folder,
+      folder: normalizedFolder,
       title: existing?.title || null,
       lastRefreshedAt: existing?.last_refreshed_at || null,
       lastRefreshStatus: existing?.last_refresh_status || null,
@@ -136,7 +137,7 @@ class FeedService {
   }
 
   importFeeds(feeds, folderOverride = '') {
-    const normalizedOverride = String(folderOverride || '').trim();
+    const normalizedOverride = normalizeFolderPath(folderOverride);
     const imported = [];
 
     for (const feed of feeds) {
@@ -154,7 +155,7 @@ class FeedService {
 
       const title = String(feed.title || '').trim();
       const name = String(feed.name || '').trim() || buildFeedNameFromUrl(parsedUrl);
-      const folder = normalizedOverride || String(feed.folder || '').trim();
+      const folder = normalizedOverride || normalizeFolderPath(feed.folder || '');
       const existing = this.db.getFeedByName(name) || this.db.getFeedBySourceUrl(parsedUrl.toString());
       const saved = this.saveFeed({
         name: existing?.name || name,

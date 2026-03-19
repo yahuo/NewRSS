@@ -1,11 +1,9 @@
 const { JSDOM } = require('jsdom');
+const { normalizeFolderPath, normalizeWhitespace } = require('./utils');
 
-const normalizeFolderSegment = (value) =>
-  String(value || '')
-    .replace(/\s+/g, ' ')
-    .trim();
+const normalizeFolderSegment = (value) => normalizeWhitespace(value);
 
-const joinFolderPath = (parts) => parts.map(normalizeFolderSegment).filter(Boolean).join('/');
+const joinFolderPath = (parts) => normalizeFolderPath(parts.join('/'));
 
 const parseOpml = (xml) => {
   const dom = new JSDOM(xml, { contentType: 'text/xml' });

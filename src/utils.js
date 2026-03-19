@@ -32,6 +32,26 @@ const stableGuid = (item) => {
   return hashText(String(rawGuid));
 };
 
+const normalizeWhitespace = (value) =>
+  String(value || '')
+    .normalize('NFKC')
+    .replace(/[\s\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000\uFEFF]+/g, ' ')
+    .trim();
+
+const normalizeFolderPath = (value) => {
+  const normalized = normalizeWhitespace(value).replace(/[\\/]+/g, '/');
+
+  if (!normalized) {
+    return '';
+  }
+
+  return normalized
+    .split('/')
+    .map((segment) => normalizeWhitespace(segment))
+    .filter(Boolean)
+    .join('/');
+};
+
 const buildFeedNameFromUrl = (input) => {
   const parsedUrl = input instanceof URL ? input : new URL(String(input));
   const seed = `${parsedUrl.hostname}${parsedUrl.pathname}`
@@ -46,6 +66,8 @@ module.exports = {
   buildFeedNameFromUrl,
   hashText,
   isoNow,
+  normalizeFolderPath,
+  normalizeWhitespace,
   stableGuid,
   stripHtml,
   truncate,

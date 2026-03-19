@@ -5,7 +5,7 @@ const Database = require('./db');
 const FeedService = require('./feed-service');
 const { renderAdminPage } = require('./admin-page');
 const { parseOpml } = require('./opml');
-const { buildFeedNameFromUrl: buildFeedNameFromUrlUtil } = require('./utils');
+const { buildFeedNameFromUrl: buildFeedNameFromUrlUtil, normalizeFolderPath } = require('./utils');
 
 const db = new Database(config.dbPath);
 const feedService = new FeedService({ db, config });
@@ -98,7 +98,7 @@ app.post('/api/feeds', (request, response) => {
 app.post('/api/opml/import', (request, response) => {
   try {
     const opmlXml = String(request.body.opmlXml || '').trim();
-    const folderOverride = String(request.body.folder || '').trim();
+    const folderOverride = normalizeFolderPath(request.body.folder || '');
 
     if (!opmlXml) {
       throw new Error('opmlXml is required');
@@ -419,7 +419,7 @@ function normalizeFeedPayload(body) {
     throw new Error('sourceUrl must be a valid URL');
   }
 
-  const folder = String(body.folder || '').trim();
+  const folder = normalizeFolderPath(body.folder || '');
   const explicitName = String(body.name || '').trim();
   const name = explicitName || buildFeedNameFromUrl(parsedUrl);
 
