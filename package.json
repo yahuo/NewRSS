@@ -1,7 +1,7 @@
 {
   "name": "newrss",
   "version": "1.0.0",
-  "description": "RSS reader-view proxy for personal self-hosting",
+  "description": "Self-hosted RSS full-text extraction service — fetches articles, extracts readable content via Readability, and republishes clean RSS feeds for Reeder and other RSS readers",
   "main": "src/server.js",
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/server.js",
