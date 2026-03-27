@@ -389,11 +389,15 @@ class FeedService {
     for (const entry of entries) {
       const articleUrl = `${baseUrl}/articles/${entry.id}`;
       const publishedAt = entry.source_published_at || entry.refreshed_at;
-      const contentHtml = entry.extracted_content_html || entry.source_content_html || '';
+      const contentHtml =
+        entry.translated_content_html ||
+        entry.extracted_content_html ||
+        entry.source_content_html ||
+        '';
       const description = entry.article_excerpt || truncate(stripHtml(contentHtml), 240);
 
       rss.item({
-        title: entry.source_title,
+        title: entry.translated_title || entry.source_title,
         guid: `${feedName}:${entry.source_guid}`,
         url: articleUrl,
         date: publishedAt,

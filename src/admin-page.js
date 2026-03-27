@@ -97,6 +97,15 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
         gap: 6px;
         font-size: 0.95rem;
       }
+      .checkbox-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .checkbox-row input[type="checkbox"] {
+        width: auto;
+        margin: 0;
+      }
       input, select {
         width: 100%;
         padding: 10px 12px;
@@ -261,8 +270,12 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
                 <option value="readability">Readability 抓正文</option>
               </select>
             </label>
+            <label class="checkbox-row">
+              <input name="translate" type="checkbox" value="true" checked />
+              <span>自动翻译英文内容</span>
+            </label>
             <button class="primary" type="submit">保存到 Read Later</button>
-            <div class="hint">默认会优先用内置的 X 专用链路处理 x.com / twitter.com，失败后再回退到 Readability。</div>
+            <div class="hint">默认会优先用内置的 X 专用链路处理 x.com / twitter.com，失败后再回退到 Readability。取消勾选后只保存原文，不触发服务器翻译。</div>
             <div class="status" id="read-later-status"></div>
           </form>
           <hr class="section-divider" />
@@ -350,6 +363,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
           url: String(formData.get('url') || '').trim(),
           title: String(formData.get('title') || '').trim(),
           mode: String(formData.get('mode') || 'auto').trim(),
+          translate: formData.get('translate') === 'true',
         };
 
         try {
@@ -365,7 +379,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
           }
 
           readLaterForm.reset();
-          setReadLaterStatus(\`已保存：\${data.result.title}（\${data.result.strategy}）\`);
+          setReadLaterStatus(\`已保存：\${data.result.title}（\${data.result.strategy}，\${data.result.translated ? '已翻译' : '原文'}）\`);
           await reload();
         } catch (error) {
           setReadLaterStatus(error.message);

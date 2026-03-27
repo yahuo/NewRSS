@@ -33,6 +33,12 @@ const config = {
   xUserAgent: process.env.X_USER_AGENT || '',
   xBearerToken: process.env.X_BEARER_TOKEN || '',
   xClientTransactionId: process.env.X_CLIENT_TRANSACTION_ID || '',
+  geminiApiKey: process.env.GEMINI_API_KEY || '',
+  geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+  geminiTimeoutMs: toInteger(process.env.GEMINI_TIMEOUT_MS, 90000),
+  geminiChunkMaxWords: toInteger(process.env.GEMINI_CHUNK_MAX_WORDS, 1200),
+  geminiChunkConcurrency: toInteger(process.env.GEMINI_CHUNK_CONCURRENCY, 3),
+  translateTargetLanguage: process.env.TRANSLATE_TARGET_LANGUAGE || 'Simplified Chinese',
 };
 
 module.exports = config;

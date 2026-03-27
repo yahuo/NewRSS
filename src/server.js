@@ -111,6 +111,7 @@ app.post('/api/read-later', async (request, response) => {
       url: payload.url,
       title: payload.title,
       mode: payload.mode,
+      translate: payload.translate,
     });
 
     response.status(201).json({
@@ -234,8 +235,12 @@ app.get('/articles/:id', (request, response) => {
     return;
   }
 
-  const title = entry.source_title || 'Untitled';
-  const contentHtml = entry.extracted_content_html || entry.source_content_html || '<p>No content available.</p>';
+  const title = entry.translated_title || entry.source_title || 'Untitled';
+  const contentHtml =
+    entry.translated_content_html ||
+    entry.extracted_content_html ||
+    entry.source_content_html ||
+    '<p>No content available.</p>';
   const contentSource = entry.translation_provider || 'source-feed';
 
   response.type('text/html; charset=utf-8').send(`<!doctype html>
@@ -508,5 +513,22 @@ function normalizeReadLaterPayload(body) {
     url,
     title: String(body.title || '').trim(),
     mode: String(body.mode || 'auto').trim(),
+    translate: normalizeReadLaterTranslate(body.translate),
   };
+}
+
+function normalizeReadLaterTranslate(value) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  const normalized = String(value ?? 'true').trim().toLowerCase();
+  if (!normalized || normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on' || normalized === 'auto') {
+    return true;
+  }
+  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+
+  throw new Error('translate must be a boolean');
 }
