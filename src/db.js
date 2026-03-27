@@ -142,6 +142,13 @@ class Database {
       WHERE id = ?
     `);
 
+    this.getEntryByFeedAndGuidStmt = this.db.prepare(`
+      SELECT *
+      FROM entries
+      WHERE feed_name = ? AND source_guid = ?
+      LIMIT 1
+    `);
+
     this.listRecentEntryErrorsByFeedStmt = this.db.prepare(`
       SELECT id, source_title, source_url, refresh_error, refreshed_at
       FROM entries
@@ -267,6 +274,10 @@ class Database {
 
   getEntryById(id) {
     return this.getEntryByIdStmt.get(id);
+  }
+
+  getEntryByFeedAndGuid(feedName, sourceGuid) {
+    return this.getEntryByFeedAndGuidStmt.get(feedName, sourceGuid);
   }
 
   listRecentEntryErrorsByFeed(feedName, limit = 3) {

@@ -243,6 +243,29 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
             <div class="status" id="status"></div>
           </form>
           <hr class="section-divider" />
+          <h2>保存稍后读</h2>
+          <form id="read-later-form" class="stack">
+            <label>
+              网页地址
+              <input name="url" placeholder="https://x.com/... 或文章链接" required />
+            </label>
+            <label>
+              标题覆盖
+              <input name="title" placeholder="可选，留空则自动提取" />
+            </label>
+            <label>
+              导入方式
+              <select name="mode">
+                <option value="auto">自动</option>
+                <option value="x-direct">X 专用导入</option>
+                <option value="readability">Readability 抓正文</option>
+              </select>
+            </label>
+            <button class="primary" type="submit">保存到 Read Later</button>
+            <div class="hint">默认会优先用内置的 X 专用链路处理 x.com / twitter.com，失败后再回退到 Readability。</div>
+            <div class="status" id="read-later-status"></div>
+          </form>
+          <hr class="section-divider" />
           <h2>导出 OPML</h2>
           <form id="export-form" class="stack">
             <label>
@@ -285,6 +308,8 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
       const form = document.getElementById('feed-form');
       const exportForm = document.getElementById('export-form');
       const status = document.getElementById('status');
+      const readLaterForm = document.getElementById('read-later-form');
+      const readLaterStatus = document.getElementById('read-later-status');
       const opmlForm = document.getElementById('opml-form');
       const opmlStatus = document.getElementById('opml-status');
 
@@ -315,6 +340,35 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
           await reload();
         } catch (error) {
           setStatus(error.message);
+        }
+      });
+
+      readLaterForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const formData = new FormData(readLaterForm);
+        const payload = {
+          url: String(formData.get('url') || '').trim(),
+          title: String(formData.get('title') || '').trim(),
+          mode: String(formData.get('mode') || 'auto').trim(),
+        };
+
+        try {
+          setReadLaterStatus('正在保存…');
+          const response = await fetch('/api/read-later', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const data = await response.json();
+          if (!response.ok || !data.ok) {
+            throw new Error(data.error || '保存失败');
+          }
+
+          readLaterForm.reset();
+          setReadLaterStatus(\`已保存：\${data.result.title}（\${data.result.strategy}）\`);
+          await reload();
+        } catch (error) {
+          setReadLaterStatus(error.message);
         }
       });
 
@@ -406,13 +460,13 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
                   </header>
                   <div class="meta">
                     <div>名称：\${escapeHtml(feed.name)}</div>
-                    <div>源地址：<a href="\${escapeHtml(feed.sourceUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.sourceUrl)}</a></div>
+                    <div>来源：\${feed.isManaged ? '本地导入' : \`<a href="\${escapeHtml(feed.sourceUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.sourceUrl)}</a>\`}</div>
                     <div>Feed：<a href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.feedUrl)}</a></div>
                     <div>最近刷新：\${escapeHtml(feed.lastRefreshedAt || '未刷新')}</div>
                     <div>已抓取：\${Number(feed.entryCount || 0)} 篇，最近失败：\${Number(feed.errorCount || 0)} 篇</div>
                   </div>
                   <div class="row-actions">
-                    <button type="button" data-action="refresh" data-name="\${escapeHtml(feed.name)}">刷新</button>
+                    \${feed.isManaged ? '' : \`<button type="button" data-action="refresh" data-name="\${escapeHtml(feed.name)}">刷新</button>\`}
                     <a class="button-like" href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">查看 Feed</a>
                     <button class="danger" type="button" data-action="delete" data-name="\${escapeHtml(feed.name)}">删除</button>
                   </div>
@@ -455,6 +509,10 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
 
       function setOpmlStatus(message) {
         opmlStatus.textContent = message || '';
+      }
+
+      function setReadLaterStatus(message) {
+        readLaterStatus.textContent = message || '';
       }
 
       function renderErrors(feed) {

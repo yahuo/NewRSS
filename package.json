@@ -16,6 +16,7 @@
     "@mozilla/readability": "^0.6.0",
     "express": "^5.2.1",
     "jsdom": "^29.0.0",
+    "markdown-it": "^14.1.1",
     "rss": "^1.2.2",
     "rss-parser": "^3.13.0"
   }

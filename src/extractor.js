@@ -10,6 +10,10 @@ const TRUNCATED_CONTENT_PATTERNS = [
   /\bread more\b/i,
   /\bfull article\b/i,
 ];
+const FAILURE_SHELL_PATTERNS = [
+  /something went wrong, but don[’']t fret/i,
+  /privacy related extensions may cause issues on x\.com/i,
+];
 
 const looksLikeTruncatedContent = (html, text) => {
   const normalizedText = text.replace(/\s+/g, ' ').trim();
@@ -224,6 +228,11 @@ const cleanupExtractedHtml = (html) => {
   return document.body.innerHTML.trim();
 };
 
+const looksLikeFailureShell = (html) => {
+  const text = stripHtml(html || '');
+  return FAILURE_SHELL_PATTERNS.some((pattern) => pattern.test(text));
+};
+
 const fetchHtml = async (url, options) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
@@ -265,6 +274,9 @@ const extractFromPage = async (url, options) => {
   }
 
   const cleanedHtml = ensureLeadMedia(cleanupExtractedHtml(article.content), fallbackLeadImageHtml);
+  if (looksLikeFailureShell(cleanedHtml)) {
+    throw new Error('readability extracted a failure shell instead of article content');
+  }
 
   return {
     html: cleanedHtml,

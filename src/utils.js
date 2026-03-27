@@ -1,5 +1,7 @@
 const { createHash } = require('node:crypto');
 
+const MANAGED_FEED_SOURCE_URL_PREFIX = 'newrss://';
+
 const stripHtml = (html) => {
   if (!html) {
     return '';
@@ -62,10 +64,17 @@ const buildFeedNameFromUrl = (input) => {
   return seed.slice(0, 64) || 'feed';
 };
 
+const buildManagedFeedSourceUrl = (feedName) =>
+  `${MANAGED_FEED_SOURCE_URL_PREFIX}${encodeURIComponent(String(feedName || '').trim() || 'feed')}`;
+
+const isManagedFeedSourceUrl = (value) => String(value || '').startsWith(MANAGED_FEED_SOURCE_URL_PREFIX);
+
 module.exports = {
   buildFeedNameFromUrl,
+  buildManagedFeedSourceUrl,
   hashText,
   isoNow,
+  isManagedFeedSourceUrl,
   normalizeFolderPath,
   normalizeWhitespace,
   stableGuid,

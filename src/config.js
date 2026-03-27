@@ -10,10 +10,13 @@ const appRoot = process.cwd();
 const config = {
   port: toInteger(process.env.PORT, 8787),
   dbPath: process.env.DB_PATH || path.join(appRoot, 'data', 'newrss.db'),
+  readLaterStoragePath: process.env.READ_LATER_STORAGE_PATH || path.join(appRoot, 'data', 'read-later'),
   host: process.env.HOST || '0.0.0.0',
   defaultFeedName: process.env.DEFAULT_FEED_NAME || 'wired',
   defaultFeedUrl: process.env.DEFAULT_FEED_URL || 'https://www.wired.com/feed/rss',
   defaultFeedFolder: process.env.DEFAULT_FEED_FOLDER || '',
+  readLaterFeedName: process.env.READ_LATER_FEED_NAME || 'read-later',
+  readLaterFeedTitle: process.env.READ_LATER_FEED_TITLE || 'Read Later',
   appBaseUrl: process.env.APP_BASE_URL || null,
   maxItemsPerRefresh: toInteger(process.env.MAX_ITEMS_PER_REFRESH, 10),
   maxItemsPerFeed: toInteger(process.env.MAX_ITEMS_PER_FEED, 50),
@@ -22,6 +25,14 @@ const config = {
   refreshOnBoot: process.env.REFRESH_ON_BOOT !== 'false',
   userAgent: process.env.USER_AGENT || 'NewRSS/0.1 (+https://tailscale.local)',
   upstreamProxyUrl: process.env.UPSTREAM_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '',
+  xCookieFile: process.env.X_COOKIE_FILE || '',
+  xAuthToken: process.env.X_AUTH_TOKEN || '',
+  xCt0: process.env.X_CT0 || '',
+  xGuestToken: process.env.X_GUEST_TOKEN || '',
+  xTwid: process.env.X_TWID || '',
+  xUserAgent: process.env.X_USER_AGENT || '',
+  xBearerToken: process.env.X_BEARER_TOKEN || '',
+  xClientTransactionId: process.env.X_CLIENT_TRANSACTION_ID || '',
 };
 
 module.exports = config;

@@ -30,6 +30,7 @@ NewRSS 是一个面向 `Reeder` 等 RSS 阅读器的自托管 Reader View 工具
 - 管理页：`/admin`
 - 源列表 API：`GET /api/feeds`
 - 新增或更新源：`POST /api/feeds`
+- 保存单条稍后读：`POST /api/read-later`
 - 删除源：`DELETE /api/feeds/:name`
 - 单源刷新：`POST /api/feeds/:name/refresh`
 - OPML 导入：`POST /api/opml/import`
@@ -114,6 +115,40 @@ APP_BASE_URL=http://your-device-name.sgponte:8787
 /opml.xml?folder=TECH
 ```
 
+## Read Later
+
+你可以把任意网页 URL 直接推送进固定的 `read-later` feed：
+
+```bash
+curl -X POST http://localhost:8787/api/read-later \
+  -H 'content-type: application/json' \
+  -d '{
+    "url": "https://x.com/dotey/status/2031231856071372830"
+  }'
+```
+
+返回结果会包含：
+
+- `articleUrl`：NewRSS 托管的文章页
+- `feedUrl`：固定的 `read-later` RSS 地址
+- `strategy`：实际采用的导入策略
+
+可选字段：
+
+- `title`
+  手动覆盖标题
+- `mode`
+  `auto` / `x-direct` / `readability`
+
+其中：
+
+- `auto`
+  对 `x.com` / `twitter.com` 优先走内置的 X 专用导入链路，失败再回退
+- `x-direct`
+  强制走内置的 X 专用导入链路
+- `readability`
+  强制走当前内置的 Readability 抓取逻辑
+
 ## 常用环境变量
 
 - `APP_BASE_URL`
@@ -124,6 +159,22 @@ APP_BASE_URL=http://your-device-name.sgponte:8787
   默认种子源地址
 - `DEFAULT_FEED_FOLDER`
   默认种子源目录
+- `READ_LATER_FEED_NAME`
+  固定稍后读 feed 名称，默认 `read-later`
+- `READ_LATER_FEED_TITLE`
+  固定稍后读 feed 标题，默认 `Read Later`
+- `READ_LATER_STORAGE_PATH`
+  稍后读导入文件落盘目录，默认 `data/read-later`
+- `X_AUTH_TOKEN`
+  X 登录态 cookie 中的 `auth_token`
+- `X_CT0`
+  X 登录态 cookie 中的 `ct0`
+- `X_COOKIE_FILE`
+  可选，指向一份 JSON cookie 文件；提供后可代替直接写 `X_AUTH_TOKEN` / `X_CT0`
+- `X_USER_AGENT`
+  可选，覆盖内置的 X 请求 User-Agent
+- `X_BEARER_TOKEN`
+  可选，覆盖内置的 X 请求 Bearer Token
 - `REFRESH_INTERVAL_MINUTES`
   自动刷新间隔，默认 `30`
 - `REFRESH_ON_BOOT`
@@ -142,6 +193,7 @@ APP_BASE_URL=http://your-device-name.sgponte:8787
 - 某些站点会拦截正文页抓取，可能返回 `401` 或 `403`
 - 某些站点只适合摘要模式，不适合全文抓取
 - 少数站点可能需要站点级规则或浏览器抓取回退
+- X 页面依赖你自己的登录态 cookie；如果没有提供，X 专用导入会失败
 - 当前是单进程服务，适合个人或家庭自用
 
 ---
@@ -176,6 +228,7 @@ The default mode is “extract original content, no server-side translation”:
 - Admin page: `GET /admin`
 - Feed list API: `GET /api/feeds`
 - Create or update a feed: `POST /api/feeds`
+- Save one read-later URL: `POST /api/read-later`
 - Delete a feed: `DELETE /api/feeds/:name`
 - Refresh one feed: `POST /api/feeds/:name/refresh`
 - Import OPML: `POST /api/opml/import`
@@ -258,6 +311,25 @@ You can also call:
 /opml.xml?folder=TECH
 ```
 
+## Read Later
+
+You can push any page URL into the fixed `read-later` feed:
+
+```bash
+curl -X POST http://localhost:8787/api/read-later \
+  -H 'content-type: application/json' \
+  -d '{
+    "url": "https://x.com/dotey/status/2031231856071372830"
+  }'
+```
+
+Optional fields:
+
+- `title` to override the detected title
+- `mode` with `auto`, `x-direct`, or `readability`
+
+For X/Twitter URLs, `auto` prefers NewRSS's built-in X importer and falls back only when needed.
+
 ## Common Environment Variables
 
 - `APP_BASE_URL`
@@ -268,6 +340,22 @@ You can also call:
   Default seed feed URL
 - `DEFAULT_FEED_FOLDER`
   Default seed folder
+- `READ_LATER_FEED_NAME`
+  Fixed read-later feed name, default `read-later`
+- `READ_LATER_FEED_TITLE`
+  Fixed read-later feed title, default `Read Later`
+- `READ_LATER_STORAGE_PATH`
+  Storage path for imported read-later entries, default `data/read-later`
+- `X_AUTH_TOKEN`
+  `auth_token` from an authenticated X session
+- `X_CT0`
+  `ct0` from an authenticated X session
+- `X_COOKIE_FILE`
+  Optional JSON cookie file path; can be used instead of inline `X_AUTH_TOKEN` / `X_CT0`
+- `X_USER_AGENT`
+  Optional override for the built-in X request user agent
+- `X_BEARER_TOKEN`
+  Optional override for the built-in X request bearer token
 - `REFRESH_INTERVAL_MINUTES`
   Auto-refresh interval, default `30`
 - `REFRESH_ON_BOOT`
@@ -286,4 +374,5 @@ You can also call:
 - Some publishers block article-page fetching and may return `401` or `403`
 - Some feeds are only practical in summary mode
 - A few sites may require site-specific rules or browser-based fallback
+- X importing depends on your own authenticated X cookies
 - The current runtime model is a single-process service intended for personal or home use

@@ -3,12 +3,18 @@ const Parser = require('rss-parser');
 const config = require('./config');
 const Database = require('./db');
 const FeedService = require('./feed-service');
+const ReadLaterService = require('./read-later-service');
 const { renderAdminPage } = require('./admin-page');
 const { parseOpml } = require('./opml');
-const { buildFeedNameFromUrl: buildFeedNameFromUrlUtil, normalizeFolderPath } = require('./utils');
+const {
+  buildFeedNameFromUrl: buildFeedNameFromUrlUtil,
+  isManagedFeedSourceUrl,
+  normalizeFolderPath,
+} = require('./utils');
 
 const db = new Database(config.dbPath);
 const feedService = new FeedService({ db, config });
+const readLaterService = new ReadLaterService({ db, config, feedService });
 const parser = new Parser({
   customFields: {
     item: ['content:encoded', 'creator'],
@@ -30,9 +36,11 @@ app.get('/', (request, response) => {
     endpoints: {
       refreshAll: '/refresh',
       feeds: '/api/feeds',
+      readLater: '/api/read-later',
       opml: '/opml.xml',
       admin: '/admin',
       feed: `/feeds/${encodeURIComponent(config.defaultFeedName)}.xml`,
+      readLaterFeed: `/feeds/${encodeURIComponent(config.readLaterFeedName)}.xml`,
       article: '/articles/:id',
     },
   });
@@ -86,6 +94,28 @@ app.post('/api/feeds', (request, response) => {
     response.status(201).json({
       ok: true,
       feed: mapFeedForResponse(saved, request),
+    });
+  } catch (error) {
+    response.status(400).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post('/api/read-later', async (request, response) => {
+  try {
+    const payload = normalizeReadLaterPayload(request.body);
+    const result = await readLaterService.saveUrl({
+      request,
+      url: payload.url,
+      title: payload.title,
+      mode: payload.mode,
+    });
+
+    response.status(201).json({
+      ok: true,
+      result,
     });
   } catch (error) {
     response.status(400).json({
@@ -450,6 +480,7 @@ function mapFeedForResponse(feed, request) {
     sourceUrl: feed.source_url,
     folder: feed.folder || '',
     title: feed.title || feed.name,
+    isManaged: isManagedFeedSourceUrl(feed.source_url),
     lastRefreshedAt: feed.last_refreshed_at,
     lastRefreshStatus: feed.last_refresh_status || 'idle',
     lastRefreshError: feed.last_refresh_error || '',
@@ -458,5 +489,24 @@ function mapFeedForResponse(feed, request) {
     entryCount: feed.entry_count || 0,
     errorCount: feed.error_count || 0,
     feedUrl: `${baseUrl}/feeds/${encodeURIComponent(feed.name)}.xml`,
+  };
+}
+
+function normalizeReadLaterPayload(body) {
+  const url = String(body.url || body.sourceUrl || body.source_url || '').trim();
+  if (!url) {
+    throw new Error('url is required');
+  }
+
+  try {
+    new URL(url);
+  } catch {
+    throw new Error('url must be a valid URL');
+  }
+
+  return {
+    url,
+    title: String(body.title || '').trim(),
+    mode: String(body.mode || 'auto').trim(),
   };
 }
