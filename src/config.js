@@ -17,6 +17,7 @@ const config = {
   defaultFeedFolder: process.env.DEFAULT_FEED_FOLDER || '',
   readLaterFeedName: process.env.READ_LATER_FEED_NAME || 'read-later',
   readLaterFeedTitle: process.env.READ_LATER_FEED_TITLE || 'Read Later',
+  readLaterFeedFolder: process.env.READ_LATER_FEED_FOLDER || 'Read Later',
   appBaseUrl: process.env.APP_BASE_URL || null,
   maxItemsPerRefresh: toInteger(process.env.MAX_ITEMS_PER_REFRESH, 10),
   maxItemsPerFeed: toInteger(process.env.MAX_ITEMS_PER_FEED, 50),

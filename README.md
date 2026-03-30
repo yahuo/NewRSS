@@ -149,6 +149,8 @@ curl -X POST http://localhost:8787/api/read-later \
 - `readability`
   强制走当前内置的 Readability 抓取逻辑
 
+管理页会把这个 managed feed 固定放到 `Read Later` 目录下，并支持逐条删除 read-later 条目。
+
 ## 常用环境变量
 
 - `APP_BASE_URL`
@@ -163,6 +165,8 @@ curl -X POST http://localhost:8787/api/read-later \
   固定稍后读 feed 名称，默认 `read-later`
 - `READ_LATER_FEED_TITLE`
   固定稍后读 feed 标题，默认 `Read Later`
+- `READ_LATER_FEED_FOLDER`
+  固定稍后读 feed 目录，默认 `Read Later`
 - `READ_LATER_STORAGE_PATH`
   稍后读导入文件落盘目录，默认 `data/read-later`
 - `X_AUTH_TOKEN`
@@ -338,6 +342,7 @@ Optional fields:
 
 For X/Twitter URLs, `auto` prefers NewRSS's built-in X importer and falls back only when needed.
 When `translate` is `false`, the item is stored as original content only even if Gemini translation is configured.
+The admin page keeps this managed feed under the `Read Later` folder and supports deleting individual read-later items.
 
 ## Common Environment Variables
 
@@ -353,6 +358,8 @@ When `translate` is `false`, the item is stored as original content only even if
   Fixed read-later feed name, default `read-later`
 - `READ_LATER_FEED_TITLE`
   Fixed read-later feed title, default `Read Later`
+- `READ_LATER_FEED_FOLDER`
+  Fixed read-later feed folder, default `Read Later`
 - `READ_LATER_STORAGE_PATH`
   Storage path for imported read-later entries, default `data/read-later`
 - `X_AUTH_TOKEN`

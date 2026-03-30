@@ -68,7 +68,8 @@ class ReadLaterService {
     this.feedService.ensureFeed(
       feedName,
       buildManagedFeedSourceUrl(feedName),
-      this.config.readLaterFeedTitle
+      this.config.readLaterFeedTitle,
+      this.config.readLaterFeedFolder
     );
 
     const sourcePublishedAt = imported.sourcePublishedAt || existing?.source_published_at || now;
@@ -155,6 +156,55 @@ class ReadLaterService {
       console.error(`[translate] skipped for ${sourceUrl}: ${error.message}`);
       return null;
     }
+  }
+
+  listItems({ request, limit = 50 }) {
+    const existingFeed = this.db.getFeedByName(this.config.readLaterFeedName);
+    if (existingFeed) {
+      this.feedService.ensureFeed(
+        this.config.readLaterFeedName,
+        buildManagedFeedSourceUrl(this.config.readLaterFeedName),
+        this.config.readLaterFeedTitle,
+        this.config.readLaterFeedFolder
+      );
+    }
+
+    const baseUrl = this.feedService.baseUrl(request);
+    return this.db.listEntriesByFeed(this.config.readLaterFeedName, limit).map((entry) => ({
+      id: entry.id,
+      title: entry.translated_title || entry.source_title || 'Untitled',
+      sourceUrl: entry.source_url,
+      articleUrl: `${baseUrl}/articles/${entry.id}`,
+      sourcePublishedAt: entry.source_published_at || null,
+      refreshedAt: entry.refreshed_at,
+      translated: Boolean(entry.translated_content_html),
+    }));
+  }
+
+  deleteItem(entryId) {
+    const normalizedId = Number.parseInt(String(entryId), 10);
+    if (!Number.isInteger(normalizedId) || normalizedId <= 0) {
+      throw new Error('invalid read-later entry id');
+    }
+
+    const existing = this.db.getEntryById(normalizedId);
+    if (!existing || existing.feed_name !== this.config.readLaterFeedName) {
+      return {
+        changes: 0,
+      };
+    }
+
+    const deleted = this.db.deleteEntryByFeedAndId(this.config.readLaterFeedName, normalizedId);
+    if (deleted.changes) {
+      const workspaceDir = path.join(this.config.readLaterStoragePath, existing.source_guid);
+      fs.rmSync(workspaceDir, { recursive: true, force: true });
+    }
+
+    return {
+      changes: deleted.changes,
+      id: normalizedId,
+      sourceGuid: existing.source_guid,
+    };
   }
 
   normalizeMode(mode) {
