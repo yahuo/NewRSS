@@ -1,6 +1,6 @@
 const { renderMarkdown } = require('./markdown-renderer');
 const { chunkMarkdown } = require('./markdown-chunker');
-const { normalizeWhitespace, stripHtml, truncate } = require('./utils');
+const { extractMarkdownHeadingTitle, normalizeDerivedTitle, normalizeWhitespace, stripHtml, truncate } = require('./utils');
 
 const ENGLISH_SAMPLE_LIMIT = 6_000;
 const MAX_TRANSLATABLE_CHARS = 120_000;
@@ -169,7 +169,7 @@ class TranslationService {
 
 module.exports = TranslationService;
 
-async function callGemini({ apiKey, model, timeoutMs, prompt }) {
+async function fetchGeminiContent({ apiKey, model, timeoutMs, prompt, generationConfig = {} }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Number(timeoutMs) || 90_000);
 
@@ -192,70 +192,7 @@ async function callGemini({ apiKey, model, timeoutMs, prompt }) {
           ],
           generationConfig: {
             temperature: 0.2,
-            responseMimeType: 'application/json',
-            responseJsonSchema: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                translatedTitle: {
-                  type: 'string',
-                  description: 'Translated title in the target language.',
-                },
-                translatedContentHtml: {
-                  type: 'string',
-                  description: 'Translated HTML body in the target language while preserving valid HTML tags and original links.',
-                },
-              },
-              required: ['translatedTitle', 'translatedContentHtml'],
-            },
-          },
-        }),
-      }
-    );
-
-    const payload = await response.json().catch(() => null);
-    if (!response.ok) {
-      const message =
-        payload?.error?.message ||
-        payload?.error?.status ||
-        `Gemini request failed with status ${response.status}`;
-      throw new Error(message);
-    }
-
-    const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) {
-      throw new Error('Gemini returned no candidate text');
-    }
-
-    return JSON.parse(text);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function callGeminiText({ apiKey, model, timeoutMs, prompt }) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Number(timeoutMs) || 90_000);
-
-  try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      {
-        method: 'POST',
-        signal: controller.signal,
-        headers: {
-          'content-type': 'application/json',
-          'x-goog-api-key': apiKey,
-        },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: prompt }],
-            },
-          ],
-          generationConfig: {
-            temperature: 0.2,
+            ...generationConfig,
           },
         }),
       }
@@ -283,6 +220,38 @@ async function callGeminiText({ apiKey, model, timeoutMs, prompt }) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function callGemini({ apiKey, model, timeoutMs, prompt }) {
+  const text = await fetchGeminiContent({
+    apiKey,
+    model,
+    timeoutMs,
+    prompt,
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseJsonSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          translatedTitle: {
+            type: 'string',
+            description: 'Translated title in the target language.',
+          },
+          translatedContentHtml: {
+            type: 'string',
+            description: 'Translated HTML body in the target language while preserving valid HTML tags and original links.',
+          },
+        },
+        required: ['translatedTitle', 'translatedContentHtml'],
+      },
+    },
+  });
+  return JSON.parse(text);
+}
+
+async function callGeminiText({ apiKey, model, timeoutMs, prompt }) {
+  return fetchGeminiContent({ apiKey, model, timeoutMs, prompt });
 }
 
 function buildTranslationPrompt({ title, contentHtml, sourceUrl, targetLanguage }) {
@@ -384,16 +353,6 @@ function deriveTitleFromMarkdown(markdown) {
     .filter(Boolean);
 
   return lines[0] || '';
-}
-
-function extractMarkdownHeadingTitle(markdown) {
-  const match = String(markdown || '').match(/^\s*#\s+(.+?)\s*$/m);
-  return match ? normalizeDerivedTitle(match[1]) : '';
-}
-
-function normalizeDerivedTitle(value) {
-  const normalized = normalizeWhitespace(value);
-  return normalized ? truncate(normalized, 120) : '';
 }
 
 async function mapWithConcurrency(items, concurrency, mapper) {

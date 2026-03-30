@@ -69,12 +69,24 @@ const buildManagedFeedSourceUrl = (feedName) =>
 
 const isManagedFeedSourceUrl = (value) => String(value || '').startsWith(MANAGED_FEED_SOURCE_URL_PREFIX);
 
+const normalizeDerivedTitle = (value, maxLength = 120) => {
+  const normalized = normalizeWhitespace(value);
+  return normalized ? truncate(normalized, maxLength) : '';
+};
+
+const extractMarkdownHeadingTitle = (markdown, maxLength = 120) => {
+  const match = String(markdown || '').match(/^\s*#\s+(.+?)\s*$/m);
+  return match ? normalizeDerivedTitle(match[1], maxLength) : '';
+};
+
 module.exports = {
   buildFeedNameFromUrl,
   buildManagedFeedSourceUrl,
+  extractMarkdownHeadingTitle,
   hashText,
   isoNow,
   isManagedFeedSourceUrl,
+  normalizeDerivedTitle,
   normalizeFolderPath,
   normalizeWhitespace,
   stableGuid,
