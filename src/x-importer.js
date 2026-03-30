@@ -1,7 +1,9 @@
 const { loadXCookies, fetchXArticle, fetchXTweet } = require('./x-client');
 const { formatArticleMarkdown, formatThreadTweetsMarkdown, extractReferencedTweetIds } = require('./x-format');
 const { fetchTweetThread } = require('./x-thread');
-const { normalizeWhitespace, truncate } = require('./utils');
+const { extractMarkdownHeadingTitle, normalizeDerivedTitle, normalizeWhitespace } = require('./utils');
+
+const MAX_DERIVED_TITLE_LENGTH = 72;
 
 function parseTweetId(input) {
   const trimmed = String(input || '').trim();
@@ -87,15 +89,23 @@ function isOnlyUrl(text) {
 }
 
 function extractMarkdownTitle(markdown) {
-  const match = String(markdown || '').match(/^\s*#\s+(.+?)\s*$/m);
-  return match ? normalizeWhitespace(match[1]) : '';
+  return extractMarkdownHeadingTitle(markdown, MAX_DERIVED_TITLE_LENGTH);
+}
+
+function extractLeadLine(text) {
+  const lines = String(text || '')
+    .split(/\r?\n+/)
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean);
+
+  return lines.find((line) => !isOnlyUrl(line)) || lines[0] || '';
 }
 
 function buildThreadTitle(thread) {
   const firstTweet = thread?.tweets?.[0];
-  const base = normalizeWhitespace(parseTweetText(firstTweet));
-  if (base) {
-    return truncate(base, 100);
+  const leadLine = extractLeadLine(parseTweetText(firstTweet));
+  if (leadLine) {
+    return normalizeDerivedTitle(leadLine, MAX_DERIVED_TITLE_LENGTH);
   }
 
   const username = thread?.user?.screen_name;

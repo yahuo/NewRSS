@@ -3,6 +3,7 @@ const path = require('node:path');
 const { resolveArticleContent } = require('./extractor');
 const { renderMarkdown } = require('./markdown-renderer');
 const { importXUrl } = require('./x-importer');
+const TranslationService = require('./translation-service');
 const {
   buildManagedFeedSourceUrl,
   hashText,
@@ -20,9 +21,10 @@ class ReadLaterService {
     this.db = db;
     this.config = config;
     this.feedService = feedService;
+    this.translationService = new TranslationService(config);
   }
 
-  async saveUrl({ request, url, title = '', mode = 'auto' }) {
+  async saveUrl({ request, url, title = '', mode = 'auto', translate = true }) {
     const parsedUrl = new URL(String(url || '').trim());
     const normalizedUrl = parsedUrl.toString();
     const normalizedMode = this.normalizeMode(mode);
@@ -37,6 +39,31 @@ class ReadLaterService {
       workspaceDir,
       title,
     });
+    const translation = await this.maybeTranslateImported({
+      translate,
+      imported,
+      sourceUrl: normalizedUrl,
+    });
+    const sourceContentHtml = imported.sourceContentHtml || imported.extractedContentHtml || '';
+    const displayContentHtml = translation?.translatedContentHtml || imported.extractedContentHtml || sourceContentHtml || '';
+    const displayTitle = translation?.translatedTitle || imported.sourceTitle;
+    const translationProvider = translation
+      ? `${imported.translationProvider}+${translation.provider}`
+      : imported.translationProvider;
+    const archivedHtmlPath = imported.htmlPath || null;
+
+    if (archivedHtmlPath && displayContentHtml) {
+      fs.writeFileSync(
+        archivedHtmlPath,
+        renderArchivedHtmlPage({
+          title: displayTitle || imported.sourceTitle || normalizedUrl,
+          sourceUrl: normalizedUrl,
+          contentHtml: displayContentHtml,
+          provider: translationProvider,
+        }),
+        'utf8'
+      );
+    }
 
     this.feedService.ensureFeed(
       feedName,
@@ -44,7 +71,6 @@ class ReadLaterService {
       this.config.readLaterFeedTitle
     );
 
-    const contentHtml = imported.extractedContentHtml || imported.sourceContentHtml || '';
     const sourcePublishedAt = imported.sourcePublishedAt || existing?.source_published_at || now;
 
     this.db.upsertEntry({
@@ -54,12 +80,12 @@ class ReadLaterService {
       sourceTitle: imported.sourceTitle,
       sourceAuthor: imported.sourceAuthor || '',
       sourcePublishedAt,
-      sourceContentHtml: imported.sourceContentHtml || contentHtml,
-      extractedContentHtml: contentHtml,
-      translatedTitle: null,
-      translatedContentHtml: null,
-      articleExcerpt: truncate(stripHtml(contentHtml), 240),
-      translationProvider: imported.translationProvider,
+      sourceContentHtml: sourceContentHtml,
+      extractedContentHtml: imported.extractedContentHtml || sourceContentHtml,
+      translatedTitle: translation?.translatedTitle || null,
+      translatedContentHtml: translation?.translatedContentHtml || null,
+      articleExcerpt: truncate(stripHtml(displayContentHtml), 240),
+      translationProvider,
       refreshStatus: 'ok',
       refreshError: '',
       refreshedAt: now,
@@ -84,16 +110,51 @@ class ReadLaterService {
       feedUrl: `${baseUrl}/feeds/${encodeURIComponent(feedName)}.xml`,
       sourceGuid,
       sourceUrl: normalizedUrl,
-      title: savedEntry.source_title || imported.sourceTitle,
+      title: savedEntry.translated_title || savedEntry.source_title || displayTitle,
       mode: normalizedMode,
+      translate,
+      translated: Boolean(translation),
       strategy: imported.strategy,
       storage: {
         workspaceDir,
         markdownPath: imported.markdownPath || null,
-        htmlPath: imported.htmlPath || null,
+        htmlPath: archivedHtmlPath,
       },
       existed: Boolean(existing),
     };
+  }
+
+  async maybeTranslateImported({ translate, imported, sourceUrl }) {
+    if (!translate) {
+      return null;
+    }
+
+    if (!this.translationService.shouldTranslate({
+      title: imported.sourceTitle,
+      contentHtml: imported.extractedContentHtml || imported.sourceContentHtml || '',
+    })) {
+      return null;
+    }
+
+    try {
+      if (imported.sourceMarkdown) {
+        return await this.translationService.translateMarkdown({
+          sourceTitle: imported.sourceTitle,
+          markdown: imported.sourceMarkdown,
+          sourceUrl,
+          sourceAuthor: imported.sourceAuthor || '',
+        });
+      }
+
+      return await this.translationService.translateArticle({
+        sourceTitle: imported.sourceTitle,
+        contentHtml: imported.extractedContentHtml || imported.sourceContentHtml || '',
+        sourceUrl,
+      });
+    } catch (error) {
+      console.error(`[translate] skipped for ${sourceUrl}: ${error.message}`);
+      return null;
+    }
   }
 
   normalizeMode(mode) {
@@ -165,6 +226,7 @@ class ReadLaterService {
       sourceTitle: xResult.sourceTitle || rendered.title,
       sourceAuthor: xResult.sourceAuthor || rendered.author || '',
       sourcePublishedAt: xResult.sourcePublishedAt || null,
+      sourceMarkdown: xResult.markdown,
       sourceContentHtml: cleanedContentHtml,
       extractedContentHtml: cleanedContentHtml,
       translationProvider: 'newrss-x-direct',
