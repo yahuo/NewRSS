@@ -149,6 +149,11 @@ class Database {
       LIMIT 1
     `);
 
+    this.deleteEntryByFeedAndIdStmt = this.db.prepare(`
+      DELETE FROM entries
+      WHERE feed_name = ? AND id = ?
+    `);
+
     this.listRecentEntryErrorsByFeedStmt = this.db.prepare(`
       SELECT id, source_title, source_url, refresh_error, refreshed_at
       FROM entries
@@ -278,6 +283,10 @@ class Database {
 
   getEntryByFeedAndGuid(feedName, sourceGuid) {
     return this.getEntryByFeedAndGuidStmt.get(feedName, sourceGuid);
+  }
+
+  deleteEntryByFeedAndId(feedName, entryId) {
+    return this.deleteEntryByFeedAndIdStmt.run(feedName, entryId);
   }
 
   listRecentEntryErrorsByFeed(feedName, limit = 3) {

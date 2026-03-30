@@ -82,7 +82,7 @@ app.get('/api/feeds', (request, response) => {
   feedService.ensureBootstrapFeed();
   response.json({
     ok: true,
-    feeds: feedService.listFeeds(request),
+    feeds: listAdminFeeds(request),
   });
 });
 
@@ -117,6 +117,29 @@ app.post('/api/read-later', async (request, response) => {
     response.status(201).json({
       ok: true,
       result,
+    });
+  } catch (error) {
+    response.status(400).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.delete('/api/read-later/items/:id', (request, response) => {
+  try {
+    const deleted = readLaterService.deleteItem(request.params.id);
+    if (!deleted.changes) {
+      response.status(404).json({
+        ok: false,
+        error: 'read-later item not found',
+      });
+      return;
+    }
+
+    response.json({
+      ok: true,
+      deleted,
     });
   } catch (error) {
     response.status(400).json({
@@ -196,12 +219,13 @@ app.post('/api/feeds/:name/refresh', async (request, response) => {
 
 app.get('/admin', (request, response) => {
   feedService.ensureBootstrapFeed();
-  const feeds = feedService.listFeeds(request);
+  const feeds = listAdminFeeds(request);
   response.type('text/html; charset=utf-8').send(
     renderAdminPage({
       feeds,
       folders: Array.from(new Set(feeds.map((feed) => feed.folder).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
       baseUrl: config.appBaseUrl || `${request.protocol}://${request.get('host')}`,
+      readLaterFeedName: config.readLaterFeedName,
     })
   );
 });
@@ -475,6 +499,28 @@ function normalizeFeedPayload(body) {
 
 function buildFeedNameFromUrl(parsedUrl) {
   return buildFeedNameFromUrlUtil(parsedUrl);
+}
+
+function listAdminFeeds(request) {
+  const feeds = feedService.listFeeds(request);
+  const readLaterItems = readLaterService.listItems({
+    request,
+    limit: config.maxItemsPerFeed,
+  });
+
+  return feeds.map((feed) => {
+    if (feed.name === config.readLaterFeedName) {
+      return {
+        ...feed,
+        items: readLaterItems,
+      };
+    }
+
+    return {
+      ...feed,
+      items: [],
+    };
+  });
 }
 
 function mapFeedForResponse(feed, request) {

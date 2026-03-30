@@ -1,4 +1,4 @@
-function renderAdminPage({ feeds, folders = [], baseUrl }) {
+function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
   return `<!doctype html>
 <html lang="zh-CN">
   <head>
@@ -191,6 +191,53 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
         gap: 8px;
         margin-top: 14px;
       }
+      .entry-list {
+        display: grid;
+        gap: 10px;
+        margin-top: 14px;
+      }
+      .entry-item {
+        display: grid;
+        gap: 8px;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.78);
+      }
+      .entry-title {
+        font-size: 0.98rem;
+        font-weight: 600;
+        color: var(--ink);
+        text-decoration: none;
+      }
+      .entry-meta {
+        display: grid;
+        gap: 4px;
+        color: var(--muted);
+        font-size: 0.88rem;
+        line-height: 1.5;
+      }
+      .entry-meta a {
+        color: var(--accent);
+        word-break: break-all;
+      }
+      .inline-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .inline-actions button,
+      .inline-actions .button-like {
+        padding: 8px 12px;
+        box-shadow: none;
+      }
+      .subheading {
+        margin-top: 16px;
+        color: var(--muted);
+        font-size: 0.85rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
       .error-box {
         border-radius: 14px;
         padding: 12px 14px;
@@ -325,6 +372,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
       const readLaterStatus = document.getElementById('read-later-status');
       const opmlForm = document.getElementById('opml-form');
       const opmlStatus = document.getElementById('opml-status');
+      const readLaterFeedName = ${JSON.stringify(readLaterFeedName)};
 
       render(initialFeeds);
 
@@ -484,6 +532,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
                     <a class="button-like" href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">查看 Feed</a>
                     <button class="danger" type="button" data-action="delete" data-name="\${escapeHtml(feed.name)}">删除</button>
                   </div>
+                  \${renderReadLaterItems(feed)}
                   \${renderErrors(feed)}
                 </article>\`;
               }).join('')}
@@ -496,7 +545,15 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
             const action = button.dataset.action;
             const name = button.dataset.name;
             try {
-              if (action === 'delete') {
+              if (action === 'delete-read-later-entry') {
+                const entryId = button.dataset.entryId;
+                if (!window.confirm('确定删除这条 Read Later 吗？')) return;
+                setReadLaterStatus('正在删除条目…');
+                const response = await fetch(\`/api/read-later/items/\${encodeURIComponent(entryId)}\`, { method: 'DELETE' });
+                const data = await response.json();
+                if (!response.ok || !data.ok) throw new Error(data.error || '删除条目失败');
+                setReadLaterStatus('条目已删除');
+              } else if (action === 'delete') {
                 if (!window.confirm(\`确定删除源 "\${name}" 吗？\`)) return;
                 setStatus('正在删除…');
                 const response = await fetch(\`/api/feeds/\${encodeURIComponent(name)}\`, { method: 'DELETE' });
@@ -545,6 +602,30 @@ function renderAdminPage({ feeds, folders = [], baseUrl }) {
         }
 
         return \`<div class="errors">\${blocks.join('')}</div>\`;
+      }
+
+      function renderReadLaterItems(feed) {
+        if (!feed.isManaged || feed.name !== readLaterFeedName) {
+          return '';
+        }
+
+        const items = Array.isArray(feed.items) ? feed.items : [];
+        const body = items.length
+          ? items.map((item) => \`<div class="entry-item">
+              <a class="entry-title" href="\${escapeHtml(item.articleUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(item.title || 'Untitled')}</a>
+              <div class="entry-meta">
+                <div>原文：<a href="\${escapeHtml(item.sourceUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(item.sourceUrl)}</a></div>
+                <div>发布时间：\${escapeHtml(item.sourcePublishedAt || '未知')}</div>
+                <div>导入状态：\${item.translated ? '已翻译' : '原文'}</div>
+              </div>
+              <div class="inline-actions">
+                <a class="button-like" href="\${escapeHtml(item.articleUrl)}" target="_blank" rel="noreferrer">查看文章</a>
+                <button class="danger" type="button" data-action="delete-read-later-entry" data-entry-id="\${escapeHtml(item.id)}">删除条目</button>
+              </div>
+            </div>\`).join('')
+          : '<div class="empty">Read Later 里还没有条目。</div>';
+
+        return \`<div class="subheading">Read Later 条目</div><div class="entry-list">\${body}</div>\`;
       }
 
       function escapeHtml(value) {

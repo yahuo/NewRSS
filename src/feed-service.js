@@ -82,14 +82,14 @@ class FeedService {
     return this.db.getFeedByName(this.config.defaultFeedName);
   }
 
-  ensureFeed(feedName, sourceUrl, sourceTitle) {
+  ensureFeed(feedName, sourceUrl, sourceTitle, folder = null) {
     const now = isoNow();
     const existing = this.db.getFeedByName(feedName);
 
     this.db.upsertFeed({
       name: feedName,
       sourceUrl,
-      folder: normalizeFolderPath(existing?.folder || ''),
+      folder: normalizeFolderPath(folder == null ? existing?.folder || '' : folder || existing?.folder || ''),
       title: sourceTitle || existing?.title || feedName,
       lastRefreshedAt: existing?.last_refreshed_at || null,
       createdAt: existing?.created_at || now,
