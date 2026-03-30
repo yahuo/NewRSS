@@ -83,6 +83,11 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         margin: 0 0 12px;
         font-size: 1.2rem;
       }
+      .main-section + .main-section {
+        margin-top: 24px;
+        padding-top: 22px;
+        border-top: 1px solid var(--line);
+      }
       .section-divider {
         margin: 18px 0;
         border: 0;
@@ -196,6 +201,51 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         gap: 10px;
         margin-top: 14px;
       }
+      .read-later-card {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 16px;
+        background: rgba(255, 255, 255, 0.76);
+      }
+      .read-later-panel {
+        margin-top: 16px;
+        padding-top: 14px;
+        border-top: 1px solid var(--line);
+      }
+      .read-later-summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 0.95rem;
+        font-weight: 600;
+        list-style: none;
+      }
+      .read-later-summary::-webkit-details-marker {
+        display: none;
+      }
+      .read-later-summary::after {
+        content: '展开';
+        color: var(--accent);
+        font-size: 0.88rem;
+        font-weight: 500;
+      }
+      .read-later-panel[open] .read-later-summary::after {
+        content: '收起';
+      }
+      .read-later-summary-main {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .entry-search {
+        margin-top: 14px;
+      }
+      .entry-search input[type="search"] {
+        width: 100%;
+      }
       .entry-item {
         display: grid;
         gap: 8px;
@@ -230,13 +280,6 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
       .inline-actions .button-like {
         padding: 8px 12px;
         box-shadow: none;
-      }
-      .subheading {
-        margin-top: 16px;
-        color: var(--muted);
-        font-size: 0.85rem;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
       }
       .error-box {
         border-radius: 14px;
@@ -356,8 +399,14 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         </aside>
 
         <main class="card">
-          <h2>源列表</h2>
-          <div id="feed-root"></div>
+          <section class="main-section">
+            <h2>Read Later</h2>
+            <div id="read-later-root"></div>
+          </section>
+          <section class="main-section">
+            <h2>源列表</h2>
+            <div id="feed-root"></div>
+          </section>
         </main>
       </section>
     </div>
@@ -365,6 +414,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
     <script>
       const initialFeeds = ${safeJson(feeds)};
       const root = document.getElementById('feed-root');
+      const readLaterRoot = document.getElementById('read-later-root');
       const form = document.getElementById('feed-form');
       const exportForm = document.getElementById('export-form');
       const status = document.getElementById('status');
@@ -373,6 +423,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
       const opmlForm = document.getElementById('opml-form');
       const opmlStatus = document.getElementById('opml-status');
       const readLaterFeedName = ${JSON.stringify(readLaterFeedName)};
+      const appBaseUrl = ${JSON.stringify(baseUrl)};
 
       render(initialFeeds);
 
@@ -486,61 +537,62 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
       }
 
       function render(feeds) {
-        if (!feeds.length) {
-          root.innerHTML = '<div class="empty">还没有配置任何源。</div>';
-          return;
-        }
+        const readLaterFeed = feeds.find((feed) => feed.isManaged && feed.name === readLaterFeedName) || null;
+        const sourceFeeds = feeds.filter((feed) => !(feed.isManaged && feed.name === readLaterFeedName));
+
+        renderReadLaterSection(readLaterFeed);
 
         const groups = new Map();
-        for (const feed of feeds) {
+        for (const feed of sourceFeeds) {
           const folder = normalizeFolder(feed.folder) || '未分类';
           if (!groups.has(folder)) groups.set(folder, []);
           groups.get(folder).push({ ...feed, folder });
         }
 
-        root.innerHTML = Array.from(groups.entries()).map(([folder, items]) => {
-          return \`<section class="folder">
-            <h3>\${escapeHtml(folder)}</h3>
-            <div class="feed-list">
-              \${items.map((feed) => {
-                const statusClass = feed.lastRefreshStatus === 'error'
-                  ? 'pill danger'
-                  : feed.lastRefreshStatus === 'partial'
-                    ? 'pill warn'
-                    : 'pill';
-                const statusText = feed.lastRefreshStatus === 'error'
-                  ? '源失败'
-                  : feed.lastRefreshStatus === 'partial'
-                    ? '部分失败'
-                    : feed.lastRefreshStatus === 'ok'
-                      ? '正常'
-                      : '未刷新';
-                return \`<article class="feed-item">
-                  <header>
-                    <strong>\${escapeHtml(feed.title)}</strong>
-                    <span class="\${statusClass}">\${statusText}</span>
-                  </header>
-                  <div class="meta">
-                    <div>名称：\${escapeHtml(feed.name)}</div>
-                    <div>来源：\${feed.isManaged ? '本地导入' : \`<a href="\${escapeHtml(feed.sourceUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.sourceUrl)}</a>\`}</div>
-                    <div>Feed：<a href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.feedUrl)}</a></div>
-                    <div>最近刷新：\${escapeHtml(feed.lastRefreshedAt || '未刷新')}</div>
-                    <div>已抓取：\${Number(feed.entryCount || 0)} 篇，最近失败：\${Number(feed.errorCount || 0)} 篇</div>
-                  </div>
-                  <div class="row-actions">
-                    \${feed.isManaged ? '' : \`<button type="button" data-action="refresh" data-name="\${escapeHtml(feed.name)}">刷新</button>\`}
-                    <a class="button-like" href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">查看 Feed</a>
-                    <button class="danger" type="button" data-action="delete" data-name="\${escapeHtml(feed.name)}">删除</button>
-                  </div>
-                  \${renderReadLaterItems(feed)}
-                  \${renderErrors(feed)}
-                </article>\`;
-              }).join('')}
-            </div>
-          </section>\`;
-        }).join('');
+        root.innerHTML = sourceFeeds.length
+          ? Array.from(groups.entries()).map(([folder, items]) => {
+              return \`<section class="folder">
+                <h3>\${escapeHtml(folder)}</h3>
+                <div class="feed-list">
+                  \${items.map((feed) => {
+                    const statusClass = feed.lastRefreshStatus === 'error'
+                      ? 'pill danger'
+                      : feed.lastRefreshStatus === 'partial'
+                        ? 'pill warn'
+                        : 'pill';
+                    const statusText = feed.lastRefreshStatus === 'error'
+                      ? '源失败'
+                      : feed.lastRefreshStatus === 'partial'
+                        ? '部分失败'
+                        : feed.lastRefreshStatus === 'ok'
+                          ? '正常'
+                          : '未刷新';
+                    return \`<article class="feed-item">
+                      <header>
+                        <strong>\${escapeHtml(feed.title)}</strong>
+                        <span class="\${statusClass}">\${statusText}</span>
+                      </header>
+                      <div class="meta">
+                        <div>名称：\${escapeHtml(feed.name)}</div>
+                        <div>来源：\${feed.isManaged ? '本地导入' : \`<a href="\${escapeHtml(feed.sourceUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.sourceUrl)}</a>\`}</div>
+                        <div>Feed：<a href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.feedUrl)}</a></div>
+                        <div>最近刷新：\${escapeHtml(feed.lastRefreshedAt || '未刷新')}</div>
+                        <div>已抓取：\${Number(feed.entryCount || 0)} 篇，最近失败：\${Number(feed.errorCount || 0)} 篇</div>
+                      </div>
+                      <div class="row-actions">
+                        \${feed.isManaged ? '' : \`<button type="button" data-action="refresh" data-name="\${escapeHtml(feed.name)}">刷新</button>\`}
+                        <a class="button-like" href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">查看 Feed</a>
+                        <button class="danger" type="button" data-action="delete" data-name="\${escapeHtml(feed.name)}">删除</button>
+                      </div>
+                      \${renderErrors(feed)}
+                    </article>\`;
+                  }).join('')}
+                </div>
+              </section>\`;
+            }).join('')
+          : '<div class="empty">还没有配置任何源。</div>';
 
-        root.querySelectorAll('button[data-action]').forEach((button) => {
+        document.querySelectorAll('button[data-action]').forEach((button) => {
           button.addEventListener('click', async () => {
             const action = button.dataset.action;
             const name = button.dataset.name;
@@ -570,6 +622,12 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
             } catch (error) {
               setStatus(error.message);
             }
+          });
+        });
+
+        document.querySelectorAll('[data-role="read-later-search"]').forEach((input) => {
+          input.addEventListener('input', () => {
+            applyReadLaterSearch(input);
           });
         });
       }
@@ -604,6 +662,50 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         return \`<div class="errors">\${blocks.join('')}</div>\`;
       }
 
+      function renderReadLaterSection(feed) {
+        if (!feed) {
+          readLaterRoot.innerHTML = \`<article class="read-later-card">
+            <div class="meta">
+              <div>Feed：<a href="\${escapeHtml(\`\${appBaseUrl}/feeds/\${encodeURIComponent(readLaterFeedName)}.xml\`)}" target="_blank" rel="noreferrer">\${escapeHtml(\`\${appBaseUrl}/feeds/\${encodeURIComponent(readLaterFeedName)}.xml\`)}</a></div>
+              <div>状态：还没有保存任何 Read Later 条目</div>
+            </div>
+          </article>\`;
+          return;
+        }
+
+        const statusClass = feed.lastRefreshStatus === 'error'
+          ? 'pill danger'
+          : feed.lastRefreshStatus === 'partial'
+            ? 'pill warn'
+            : 'pill';
+        const statusText = feed.lastRefreshStatus === 'error'
+          ? '源失败'
+          : feed.lastRefreshStatus === 'partial'
+            ? '部分失败'
+            : feed.lastRefreshStatus === 'ok'
+              ? '正常'
+              : '未刷新';
+
+        readLaterRoot.innerHTML = \`<article class="read-later-card">
+          <header>
+            <strong>\${escapeHtml(feed.title)}</strong>
+            <span class="\${statusClass}">\${statusText}</span>
+          </header>
+          <div class="meta">
+            <div>名称：\${escapeHtml(feed.name)}</div>
+            <div>来源：本地导入</div>
+            <div>Feed：<a href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.feedUrl)}</a></div>
+            <div>最近刷新：\${escapeHtml(feed.lastRefreshedAt || '未刷新')}</div>
+            <div>已保存：\${Number(feed.entryCount || 0)} 篇</div>
+          </div>
+          <div class="row-actions">
+            <a class="button-like" href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">查看 Feed</a>
+          </div>
+          \${renderReadLaterItems(feed)}
+          \${renderErrors(feed)}
+        </article>\`;
+      }
+
       function renderReadLaterItems(feed) {
         if (!feed.isManaged || feed.name !== readLaterFeedName) {
           return '';
@@ -611,7 +713,11 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
 
         const items = Array.isArray(feed.items) ? feed.items : [];
         const body = items.length
-          ? items.map((item) => \`<div class="entry-item">
+          ? \`<label class="entry-search">
+              <span>搜索条目</span>
+              <input type="search" data-role="read-later-search" placeholder="按标题或原文链接搜索" />
+            </label>
+            <div class="entry-list" data-role="read-later-entry-list">\${items.map((item) => \`<div class="entry-item" data-role="read-later-entry-item" data-search="\${escapeHtml(buildReadLaterSearchText(item))}">
               <a class="entry-title" href="\${escapeHtml(item.articleUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(item.title || 'Untitled')}</a>
               <div class="entry-meta">
                 <div>原文：<a href="\${escapeHtml(item.sourceUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(item.sourceUrl)}</a></div>
@@ -622,10 +728,43 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
                 <a class="button-like" href="\${escapeHtml(item.articleUrl)}" target="_blank" rel="noreferrer">查看文章</a>
                 <button class="danger" type="button" data-action="delete-read-later-entry" data-entry-id="\${escapeHtml(item.id)}">删除条目</button>
               </div>
-            </div>\`).join('')
+            </div>\`).join('')}</div>
+            <div class="empty" data-role="read-later-empty-search" hidden>没有匹配的条目。</div>\`
           : '<div class="empty">Read Later 里还没有条目。</div>';
 
-        return \`<div class="subheading">Read Later 条目</div><div class="entry-list">\${body}</div>\`;
+        return \`<details class="read-later-panel">
+          <summary class="read-later-summary">
+            <span class="read-later-summary-main">Read Later 条目 <span class="pill">\${items.length}</span></span>
+          </summary>
+          \${body}
+        </details>\`;
+      }
+
+      function applyReadLaterSearch(input) {
+        const panel = input.closest('.read-later-panel');
+        const query = String(input.value || '').trim().toLowerCase();
+        const items = Array.from(panel?.querySelectorAll('[data-role="read-later-entry-item"]') || []);
+        let visibleCount = 0;
+
+        for (const item of items) {
+          const haystack = String(item.dataset.search || '').toLowerCase();
+          const matched = !query || haystack.includes(query);
+          item.hidden = !matched;
+          if (matched) {
+            visibleCount += 1;
+          }
+        }
+
+        const empty = panel?.querySelector('[data-role="read-later-empty-search"]');
+        if (empty) {
+          empty.hidden = visibleCount > 0;
+        }
+      }
+
+      function buildReadLaterSearchText(item) {
+        return [item.title || '', item.sourceUrl || '', item.sourcePublishedAt || '']
+          .join(' ')
+          .normalize('NFKC');
       }
 
       function escapeHtml(value) {
