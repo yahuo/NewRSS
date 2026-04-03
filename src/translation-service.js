@@ -1,3 +1,4 @@
+const { buildHtmlTranslationPlan } = require('./html-chunker');
 const { renderMarkdown } = require('./markdown-renderer');
 const { chunkMarkdown } = require('./markdown-chunker');
 const { extractMarkdownHeadingTitle, normalizeDerivedTitle, normalizeWhitespace, stripHtml, truncate } = require('./utils');
@@ -46,34 +47,55 @@ class TranslationService {
       return null;
     }
 
-    if (html.length > MAX_TRANSLATABLE_CHARS) {
-      throw new Error(`content too large for Gemini translation (${html.length} chars)`);
+    const htmlPlan = buildHtmlTranslationPlan(html, {
+      maxWords: this.config.geminiChunkMaxWords,
+    });
+    const shouldUseChunkedHtml = html.length > MAX_TRANSLATABLE_CHARS || htmlPlan.chunks.length > 1;
+
+    if (shouldUseChunkedHtml) {
+      return this.translateArticleInChunks({
+        sourceTitle: title,
+        sourceUrl,
+        htmlPlan,
+      });
     }
 
-    const prompt = buildTranslationPrompt({
-      title,
-      contentHtml: html,
-      sourceUrl,
-      targetLanguage: this.config.translateTargetLanguage,
-    });
-    const response = await callGemini({
-      apiKey: this.config.geminiApiKey,
-      model: this.config.geminiModel,
-      timeoutMs: this.config.geminiTimeoutMs,
-      prompt,
-    });
+    try {
+      const prompt = buildTranslationPrompt({
+        title,
+        contentHtml: html,
+        sourceUrl,
+        targetLanguage: this.config.translateTargetLanguage,
+      });
+      const response = await callGemini({
+        apiKey: this.config.geminiApiKey,
+        model: this.config.geminiModel,
+        timeoutMs: this.config.geminiTimeoutMs,
+        prompt,
+      });
 
-    const translatedTitle = normalizeWhitespace(response.translatedTitle || '');
-    const translatedContentHtml = String(response.translatedContentHtml || '').trim();
-    if (!translatedTitle || !translatedContentHtml) {
-      throw new Error('Gemini translation returned incomplete fields');
+      const translatedTitle = normalizeWhitespace(response.translatedTitle || '');
+      const translatedContentHtml = String(response.translatedContentHtml || '').trim();
+      if (!translatedTitle || !translatedContentHtml) {
+        throw new Error('Gemini translation returned incomplete fields');
+      }
+
+      return {
+        translatedTitle: truncate(translatedTitle, 120),
+        translatedContentHtml,
+        provider: this.config.geminiModel,
+      };
+    } catch (error) {
+      if (isAbortLikeError(error) && htmlPlan.chunks.length > 1) {
+        return this.translateArticleInChunks({
+          sourceTitle: title,
+          sourceUrl,
+          htmlPlan,
+        });
+      }
+
+      throw error;
     }
-
-    return {
-      translatedTitle: truncate(translatedTitle, 120),
-      translatedContentHtml,
-      provider: this.config.geminiModel,
-    };
   }
 
   async translateMarkdown({ sourceTitle, markdown, sourceUrl, sourceAuthor = '' }) {
@@ -164,6 +186,58 @@ class TranslationService {
     });
 
     return unwrapTranslatedMarkdownChunk(translated, markdown);
+  }
+
+  async translateArticleInChunks({ sourceTitle, sourceUrl, htmlPlan }) {
+    if (!htmlPlan?.chunks?.length) {
+      return null;
+    }
+
+    const translatedChunks = await mapWithConcurrency(
+      htmlPlan.chunks,
+      Math.max(1, Number(this.config.geminiChunkConcurrency) || 3),
+      (chunkHtml, index) =>
+        this.translateHtmlChunk({
+          sourceTitle,
+          sourceUrl,
+          chunkHtml,
+          chunkIndex: index,
+          chunkCount: htmlPlan.chunks.length,
+        })
+    );
+
+    const translatedTitle =
+      (sourceTitle
+        ? await this.translateTitle({
+            title: sourceTitle,
+            sourceUrl,
+          })
+        : '') || normalizeDerivedTitle(sourceTitle);
+    const translatedContentHtml = htmlPlan.wrap(translatedChunks.join('\n\n'));
+
+    return {
+      translatedTitle: translatedTitle || truncate(normalizeWhitespace(sourceTitle || ''), 120),
+      translatedContentHtml,
+      provider: `${this.config.geminiModel}-html-chunked`,
+    };
+  }
+
+  async translateHtmlChunk({ sourceTitle, sourceUrl, chunkHtml, chunkIndex, chunkCount }) {
+    const translated = await callGeminiText({
+      apiKey: this.config.geminiApiKey,
+      model: this.config.geminiModel,
+      timeoutMs: this.config.geminiTimeoutMs,
+      prompt: buildHtmlChunkPrompt({
+        sourceTitle,
+        sourceUrl,
+        html: chunkHtml,
+        chunkIndex,
+        chunkCount,
+        targetLanguage: this.config.translateTargetLanguage,
+      }),
+    });
+
+    return unwrapTranslatedHtmlChunk(translated);
   }
 }
 
@@ -293,6 +367,25 @@ function buildMarkdownChunkPrompt({ sourceTitle, sourceUrl, markdown, chunkIndex
   ].join('\n');
 }
 
+function buildHtmlChunkPrompt({ sourceTitle, sourceUrl, html, chunkIndex, chunkCount, targetLanguage }) {
+  return [
+    `Translate this HTML fragment into ${targetLanguage}.`,
+    'Rules:',
+    '- Preserve valid HTML tags and the overall fragment structure.',
+    '- Preserve every href, src, and other URL attribute value unchanged.',
+    '- Translate visible prose naturally for readers; do not explain your work.',
+    '- Do not add markdown fences or extra wrapper elements.',
+    '- Keep code, URLs, proper nouns, and publication names when appropriate.',
+    '- Return only the translated HTML fragment.',
+    '',
+    `Article title: ${sourceTitle || ''}`,
+    `Source URL: ${sourceUrl || ''}`,
+    `Chunk: ${chunkIndex + 1} of ${chunkCount}`,
+    '',
+    html,
+  ].join('\n');
+}
+
 function stripFenceWrapperText(text) {
   const value = String(text || '').trim();
   const fenced = parseFenceWrapper(value);
@@ -317,6 +410,21 @@ function unwrapTranslatedMarkdownChunk(text, originalMarkdown) {
   }
 
   if (!normalizedLang || normalizedLang === 'markdown' || normalizedLang === 'md' || normalizedLang === 'text' || normalizedLang === 'txt') {
+    return fenced.inner.trim();
+  }
+
+  return value;
+}
+
+function unwrapTranslatedHtmlChunk(text) {
+  const value = String(text || '').trim();
+  const fenced = parseFenceWrapper(value);
+  if (!fenced) {
+    return value;
+  }
+
+  const normalizedLang = fenced.lang.toLowerCase();
+  if (!normalizedLang || normalizedLang === 'html' || normalizedLang === 'htm' || normalizedLang === 'xml' || normalizedLang === 'markup' || normalizedLang === 'text' || normalizedLang === 'txt') {
     return fenced.inner.trim();
   }
 
@@ -353,6 +461,10 @@ function deriveTitleFromMarkdown(markdown) {
     .filter(Boolean);
 
   return lines[0] || '';
+}
+
+function isAbortLikeError(error) {
+  return error?.name === 'AbortError' || /aborted/i.test(String(error?.message || ''));
 }
 
 async function mapWithConcurrency(items, concurrency, mapper) {
