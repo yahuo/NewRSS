@@ -23,6 +23,7 @@ services:
       UPSTREAM_PROXY_URL: "${UPSTREAM_PROXY_URL:-}"
     volumes:
       - ./data:/app/data
+      - ./cookies:/app/secrets:ro
     healthcheck:
       test: ["CMD", "node", "scripts/healthcheck.js"]
       interval: 30s
