@@ -36,6 +36,8 @@ NewRSS 是一个面向 `Reeder` 等 RSS 阅读器的自托管 Reader View 工具
 - OPML 导入：`POST /api/opml/import`
 - OPML 导出：`GET /opml.xml`
 
+新增或更新源时，可以额外传 `translateEnabled: true`。开启后，后续刷新该 RSS 源时会自动把英文正文翻译成中文；没有配置 `GEMINI_API_KEY` 时会保留原文。
+
 ## 快速开始
 
 ### 本地运行
@@ -180,7 +182,7 @@ curl -X POST http://localhost:8787/api/read-later \
 - `X_BEARER_TOKEN`
   可选，覆盖内置的 X 请求 Bearer Token
 - `GEMINI_API_KEY`
-  可选，设置后会自动把英文的 read-later 内容翻译为中文
+  可选，设置后会自动把英文的 read-later 内容以及开启 `translateEnabled` 的 RSS 源内容翻译为中文
 - `GEMINI_MODEL`
   可选，Gemini 模型名，默认 `gemini-2.5-flash`
 - `TRANSLATE_TARGET_LANGUAGE`
@@ -204,7 +206,7 @@ curl -X POST http://localhost:8787/api/read-later \
 - 某些站点只适合摘要模式，不适合全文抓取
 - 少数站点可能需要站点级规则或浏览器抓取回退
 - X 页面依赖你自己的登录态 cookie；如果没有提供，X 专用导入会失败
-- 配置 `GEMINI_API_KEY` 后，英文内容会在导入时额外调用 Gemini 翻译，导入速度会变慢一些
+- 配置 `GEMINI_API_KEY` 后，英文内容会在导入或刷新时额外调用 Gemini 翻译，速度会变慢一些
 - 当前是单进程服务，适合个人或家庭自用
 
 ---
@@ -244,6 +246,8 @@ The default mode is “extract original content, no server-side translation”:
 - Refresh one feed: `POST /api/feeds/:name/refresh`
 - Import OPML: `POST /api/opml/import`
 - Export OPML: `GET /opml.xml`
+
+When creating or updating a feed, you can additionally send `translateEnabled: true`. Once enabled, future refreshes will automatically translate English article content into Chinese; if `GEMINI_API_KEY` is not configured, the original content is kept.
 
 ## Quick Start
 
@@ -373,7 +377,7 @@ The admin page keeps this managed feed under the `Read Later` folder and support
 - `X_BEARER_TOKEN`
   Optional override for the built-in X request bearer token
 - `GEMINI_API_KEY`
-  Optional. When set, English read-later articles are automatically translated
+  Optional. When set, English read-later articles and feeds with `translateEnabled=true` are automatically translated
 - `GEMINI_MODEL`
   Optional Gemini model name, default `gemini-2.5-flash`
 - `TRANSLATE_TARGET_LANGUAGE`
@@ -397,5 +401,5 @@ The admin page keeps this managed feed under the `Read Later` folder and support
 - Some feeds are only practical in summary mode
 - A few sites may require site-specific rules or browser-based fallback
 - X importing depends on your own authenticated X cookies
-- Importing English content is slower when Gemini translation is enabled
+- Importing or refreshing English content is slower when Gemini translation is enabled
 - The current runtime model is a single-process service intended for personal or home use

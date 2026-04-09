@@ -16,6 +16,7 @@ class Database {
         source_url TEXT NOT NULL,
         folder TEXT,
         title TEXT,
+        translate_enabled INTEGER NOT NULL DEFAULT 0,
         last_refreshed_at TEXT,
         last_refresh_status TEXT,
         last_refresh_error TEXT,
@@ -163,12 +164,13 @@ class Database {
     `);
 
     this.upsertFeedStmt = this.db.prepare(`
-      INSERT INTO feeds (name, source_url, folder, title, last_refreshed_at, last_refresh_status, last_refresh_error, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO feeds (name, source_url, folder, title, translate_enabled, last_refreshed_at, last_refresh_status, last_refresh_error, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(name) DO UPDATE SET
         source_url = excluded.source_url,
         folder = excluded.folder,
         title = COALESCE(excluded.title, feeds.title),
+        translate_enabled = excluded.translate_enabled,
         last_refreshed_at = COALESCE(excluded.last_refreshed_at, feeds.last_refreshed_at),
         last_refresh_status = COALESCE(excluded.last_refresh_status, feeds.last_refresh_status),
         last_refresh_error = COALESCE(excluded.last_refresh_error, feeds.last_refresh_error),
@@ -187,11 +189,16 @@ class Database {
   ensureFeedSchema() {
     const columns = this.db.prepare(`PRAGMA table_info(feeds)`).all();
     const hasFolder = columns.some((column) => column.name === 'folder');
+    const hasTranslateEnabled = columns.some((column) => column.name === 'translate_enabled');
     const hasLastRefreshStatus = columns.some((column) => column.name === 'last_refresh_status');
     const hasLastRefreshError = columns.some((column) => column.name === 'last_refresh_error');
 
     if (!hasFolder) {
       this.db.exec(`ALTER TABLE feeds ADD COLUMN folder TEXT;`);
+    }
+
+    if (!hasTranslateEnabled) {
+      this.db.exec(`ALTER TABLE feeds ADD COLUMN translate_enabled INTEGER NOT NULL DEFAULT 0;`);
     }
 
     if (!hasLastRefreshStatus) {
@@ -223,6 +230,7 @@ class Database {
       feed.sourceUrl,
       feed.folder || null,
       feed.title || null,
+      feed.translateEnabled ? 1 : 0,
       feed.lastRefreshedAt || null,
       feed.lastRefreshStatus || null,
       feed.lastRefreshError || null,

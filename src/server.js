@@ -494,6 +494,7 @@ function normalizeFeedPayload(body) {
     name,
     sourceUrl: parsedUrl.toString(),
     folder,
+    translateEnabled: readOptionalFeedTranslate(body),
   };
 }
 
@@ -531,6 +532,7 @@ function mapFeedForResponse(feed, request) {
     sourceUrl: feed.source_url,
     folder: feed.folder || '',
     title: feed.title || feed.name,
+    translateEnabled: Boolean(feed.translate_enabled),
     isManaged: isManagedFeedSourceUrl(feed.source_url),
     lastRefreshedAt: feed.last_refreshed_at,
     lastRefreshStatus: feed.last_refresh_status || 'idle',
@@ -561,6 +563,36 @@ function normalizeReadLaterPayload(body) {
     mode: String(body.mode || 'auto').trim(),
     translate: normalizeReadLaterTranslate(body.translate),
   };
+}
+
+function normalizeFeedTranslate(value) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (value == null || value === '') {
+    return false;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+
+  throw new Error('translateEnabled must be a boolean');
+}
+
+function readOptionalFeedTranslate(body) {
+  for (const key of ['translateEnabled', 'translate', 'translate_enabled']) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) {
+      return normalizeFeedTranslate(body[key]);
+    }
+  }
+
+  return undefined;
 }
 
 function normalizeReadLaterTranslate(value) {

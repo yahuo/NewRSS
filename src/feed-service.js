@@ -1,6 +1,7 @@
 const RSS = require('rss');
 const { resolveArticleContent } = require('./extractor');
 const { withProxy } = require('./http-client');
+const TranslationService = require('./translation-service');
 const {
   buildFeedNameFromUrl,
   isoNow,
@@ -15,6 +16,7 @@ class FeedService {
   constructor({ db, config }) {
     this.db = db;
     this.config = config;
+    this.translationService = new TranslationService(config);
   }
 
   baseUrl(request) {
@@ -74,6 +76,7 @@ class FeedService {
       sourceUrl: this.config.defaultFeedUrl,
       folder: normalizeFolderPath(this.config.defaultFeedFolder || ''),
       title: null,
+      translateEnabled: false,
       lastRefreshedAt: null,
       createdAt: now,
       updatedAt: now,
@@ -82,15 +85,18 @@ class FeedService {
     return this.db.getFeedByName(this.config.defaultFeedName);
   }
 
-  ensureFeed(feedName, sourceUrl, sourceTitle, folder = null) {
+  ensureFeed(feedName, sourceUrl, sourceTitle, folder = null, translateEnabled = null) {
     const now = isoNow();
     const existing = this.db.getFeedByName(feedName);
+    const effectiveTranslateEnabled =
+      typeof translateEnabled === 'boolean' ? translateEnabled : Boolean(existing?.translate_enabled);
 
     this.db.upsertFeed({
       name: feedName,
       sourceUrl,
       folder: normalizeFolderPath(folder == null ? existing?.folder || '' : folder || existing?.folder || ''),
       title: sourceTitle || existing?.title || feedName,
+      translateEnabled: effectiveTranslateEnabled,
       lastRefreshedAt: existing?.last_refreshed_at || null,
       createdAt: existing?.created_at || now,
       updatedAt: now,
@@ -105,6 +111,7 @@ class FeedService {
       sourceUrl: feed.source_url,
       folder: normalizeFolderPath(feed.folder || ''),
       title: feed.title || feed.name,
+      translateEnabled: Boolean(feed.translate_enabled),
       lastRefreshedAt: feed.last_refreshed_at,
       lastRefreshStatus: feed.last_refresh_status || 'idle',
       lastRefreshError: feed.last_refresh_error || '',
@@ -124,17 +131,20 @@ class FeedService {
     }));
   }
 
-  saveFeed({ name, sourceUrl, folder = '' }) {
+  saveFeed({ name, sourceUrl, folder = '', translateEnabled }) {
     const now = isoNow();
     const existing = this.db.getFeedByName(name) || this.db.getFeedBySourceUrl(sourceUrl);
     const effectiveName = existing?.name || name;
     const normalizedFolder = normalizeFolderPath(folder);
+    const effectiveTranslateEnabled =
+      typeof translateEnabled === 'boolean' ? translateEnabled : Boolean(existing?.translate_enabled);
 
     this.db.upsertFeed({
       name: effectiveName,
       sourceUrl,
       folder: normalizedFolder,
       title: existing?.title || null,
+      translateEnabled: effectiveTranslateEnabled,
       lastRefreshedAt: existing?.last_refreshed_at || null,
       lastRefreshStatus: existing?.last_refresh_status || null,
       lastRefreshError: existing?.last_refresh_error || null,
@@ -179,6 +189,7 @@ class FeedService {
           sourceUrl: saved.source_url,
           folder: saved.folder || '',
           title,
+          translateEnabled: Boolean(saved.translate_enabled),
           lastRefreshedAt: saved.last_refreshed_at || null,
           lastRefreshStatus: saved.last_refresh_status || null,
           lastRefreshError: saved.last_refresh_error || null,
@@ -209,6 +220,8 @@ class FeedService {
 
   async refreshFeed({ parser, feedName, sourceUrl }) {
     this.ensureFeed(feedName, sourceUrl, null);
+    const storedFeed = this.db.getFeedByName(feedName);
+    const translateEnabled = Boolean(storedFeed?.translate_enabled);
 
     let parsedFeed;
     try {
@@ -229,6 +242,7 @@ class FeedService {
       const sourceGuid = stableGuid(item);
       const createdAt = refreshedAt;
       const updatedAt = refreshedAt;
+      const existingEntry = this.db.getEntryByFeedAndGuid(feedName, sourceGuid);
 
       try {
         const resolved = await resolveArticleContent(item, {
@@ -238,6 +252,32 @@ class FeedService {
         });
 
         const sourceTitle = item.title || resolved.title || item.link || 'Untitled';
+        const sourceContentHtml = item['content:encoded'] || item.content || item.contentSnippet || '';
+        const extractedContentHtml = resolved.html || sourceContentHtml || '';
+        const reuseExistingTranslation =
+          translateEnabled &&
+          Boolean(existingEntry?.translated_content_html) &&
+          (existingEntry?.source_title || '') === sourceTitle &&
+          (existingEntry?.extracted_content_html || '') === extractedContentHtml;
+        const translation = reuseExistingTranslation
+          ? null
+          : await this.maybeTranslateFeedEntry({
+              feedName,
+              translateEnabled,
+              sourceTitle,
+              contentHtml: extractedContentHtml,
+              sourceUrl: item.link || sourceUrl,
+            });
+        const translatedTitle = translation?.translatedTitle || (reuseExistingTranslation ? existingEntry?.translated_title || null : null);
+        const translatedContentHtml =
+          translation?.translatedContentHtml || (reuseExistingTranslation ? existingEntry?.translated_content_html || null : null);
+        const translationProvider = translation
+          ? `${resolved.source}+${translation.provider}`
+          : reuseExistingTranslation
+            ? existingEntry?.translation_provider || resolved.source
+            : resolved.source;
+        const displayContentHtml = translatedContentHtml || extractedContentHtml;
+        const displayTitle = translatedTitle || sourceTitle;
 
         this.db.upsertEntry({
           feedName,
@@ -246,12 +286,12 @@ class FeedService {
           sourceTitle,
           sourceAuthor: item.creator || item.author || resolved.byline || '',
           sourcePublishedAt: item.isoDate || item.pubDate || null,
-          sourceContentHtml: item['content:encoded'] || item.content || item.contentSnippet || '',
-          extractedContentHtml: resolved.html,
-          translatedTitle: null,
-          translatedContentHtml: null,
-          articleExcerpt: truncate(stripHtml(resolved.html), 240),
-          translationProvider: resolved.source,
+          sourceContentHtml,
+          extractedContentHtml,
+          translatedTitle,
+          translatedContentHtml,
+          articleExcerpt: truncate(stripHtml(displayContentHtml), 240),
+          translationProvider,
           refreshStatus: 'ok',
           refreshError: '',
           refreshedAt,
@@ -262,22 +302,28 @@ class FeedService {
         results.push({
           guid: sourceGuid,
           status: 'ok',
-          title: sourceTitle,
+          title: displayTitle,
         });
       } catch (error) {
+        const sourceContentHtml = item['content:encoded'] || item.content || item.contentSnippet || existingEntry?.source_content_html || '';
+        const extractedContentHtml = existingEntry?.extracted_content_html || '';
+        const translatedTitle = existingEntry?.translated_title || null;
+        const translatedContentHtml = existingEntry?.translated_content_html || null;
+        const displayContentHtml = translatedContentHtml || extractedContentHtml || sourceContentHtml;
+
         this.db.upsertEntry({
           feedName,
           sourceGuid,
           sourceUrl: item.link || sourceUrl,
-          sourceTitle: item.title || item.link || 'Untitled',
-          sourceAuthor: item.creator || item.author || '',
-          sourcePublishedAt: item.isoDate || item.pubDate || null,
-          sourceContentHtml: item['content:encoded'] || item.content || item.contentSnippet || '',
-          extractedContentHtml: '',
-          translatedTitle: null,
-          translatedContentHtml: null,
-          articleExcerpt: truncate(stripHtml(item['content:encoded'] || item.content || item.contentSnippet || ''), 240),
-          translationProvider: 'source-feed',
+          sourceTitle: item.title || existingEntry?.source_title || item.link || 'Untitled',
+          sourceAuthor: item.creator || item.author || existingEntry?.source_author || '',
+          sourcePublishedAt: item.isoDate || item.pubDate || existingEntry?.source_published_at || null,
+          sourceContentHtml,
+          extractedContentHtml,
+          translatedTitle,
+          translatedContentHtml,
+          articleExcerpt: truncate(stripHtml(displayContentHtml), 240),
+          translationProvider: existingEntry?.translation_provider || 'source-feed',
           refreshStatus: 'error',
           refreshError: error.message,
           refreshedAt,
@@ -309,6 +355,7 @@ class FeedService {
       feedName,
       sourceUrl,
       sourceTitle: parsedFeed.title || feedName,
+      translateEnabled,
       refreshedAt,
       status: feedStatus,
       error: feedError,
@@ -363,6 +410,27 @@ class FeedService {
     }
 
     return results;
+  }
+
+  async maybeTranslateFeedEntry({ feedName, translateEnabled, sourceTitle, contentHtml, sourceUrl }) {
+    if (!translateEnabled) {
+      return null;
+    }
+
+    if (!this.translationService.shouldTranslate({ title: sourceTitle, contentHtml })) {
+      return null;
+    }
+
+    try {
+      return await this.translationService.translateArticle({
+        sourceTitle,
+        contentHtml,
+        sourceUrl,
+      });
+    } catch (error) {
+      console.error(`[translate] skipped for feed ${feedName} ${sourceUrl}: ${error.message}`);
+      return null;
+    }
   }
 
   renderFeedXml({ request, feedName }) {

@@ -337,8 +337,13 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
               目录
               <input name="folder" placeholder="例如 AI / News / Deals" />
             </label>
+            <label class="checkbox-row">
+              <input name="translateEnabled" type="checkbox" value="true" />
+              <span>自动翻译英文内容</span>
+            </label>
             <button class="primary" type="submit">保存源</button>
-            <div class="hint">名称为空时，会根据 URL 自动生成一个 slug。同名保存会更新地址和目录。</div>
+            <div class="hint">名称为空时，会根据 URL 自动生成一个 slug。同名保存会更新地址、目录和翻译设置。</div>
+            <div class="hint">勾选后，后续刷新这个 RSS 源时会自动把英文正文翻译成中文；需要先配置 <code>GEMINI_API_KEY</code>。</div>
             <div class="status" id="status"></div>
           </form>
           <hr class="section-divider" />
@@ -434,6 +439,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
           name: String(formData.get('name') || '').trim(),
           sourceUrl: String(formData.get('sourceUrl') || '').trim(),
           folder: String(formData.get('folder') || '').trim(),
+          translateEnabled: formData.get('translateEnabled') === 'true',
         };
 
         try {
@@ -576,6 +582,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
                         <div>名称：\${escapeHtml(feed.name)}</div>
                         <div>来源：\${feed.isManaged ? '本地导入' : \`<a href="\${escapeHtml(feed.sourceUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.sourceUrl)}</a>\`}</div>
                         <div>Feed：<a href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.feedUrl)}</a></div>
+                        <div>自动翻译英文内容：\${feed.translateEnabled ? '开启' : '关闭'}</div>
                         <div>最近刷新：\${escapeHtml(feed.lastRefreshedAt || '未刷新')}</div>
                         <div>已抓取：\${Number(feed.entryCount || 0)} 篇，最近失败：\${Number(feed.errorCount || 0)} 篇</div>
                       </div>
