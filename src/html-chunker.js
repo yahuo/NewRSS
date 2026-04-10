@@ -5,6 +5,7 @@ const WRAPPER_TAGS = new Set(['div', 'article', 'section', 'main']);
 
 function buildHtmlTranslationPlan(html, { maxWords = 1200 } = {}) {
   const rawHtml = String(html || '').trim();
+  const normalizedMaxWords = normalizeMaxWords(maxWords);
   if (!rawHtml) {
     return {
       chunks: [],
@@ -22,9 +23,7 @@ function buildHtmlTranslationPlan(html, { maxWords = 1200 } = {}) {
     root = root.firstElementChild;
   }
 
-  const fragments = listMeaningfulNodes(root.childNodes)
-    .map(serializeNode)
-    .filter(Boolean);
+  const fragments = listMeaningfulFragments(root.childNodes, normalizedMaxWords);
 
   if (!fragments.length) {
     return {
@@ -34,7 +33,7 @@ function buildHtmlTranslationPlan(html, { maxWords = 1200 } = {}) {
   }
 
   return {
-    chunks: groupFragments(fragments, maxWords),
+    chunks: groupFragments(fragments, normalizedMaxWords),
     wrap: createWrapper(wrappers),
   };
 }
@@ -61,6 +60,34 @@ function listMeaningfulNodes(nodes) {
   });
 }
 
+function listMeaningfulFragments(nodes, maxWords) {
+  return listMeaningfulNodes(nodes).flatMap((node) => splitMeaningfulNode(node, maxWords));
+}
+
+function splitMeaningfulNode(node, maxWords) {
+  const serialized = serializeNode(node);
+  if (!serialized) {
+    return [];
+  }
+
+  if (node.nodeType !== 1) {
+    return [serialized];
+  }
+
+  const wordCount = countWords(stripHtml(serialized));
+  if (wordCount <= maxWords) {
+    return [serialized];
+  }
+
+  const childFragments = listMeaningfulFragments(node.childNodes, maxWords);
+  if (childFragments.length <= 1) {
+    return [serialized];
+  }
+
+  const wrapper = createWrapper([node.cloneNode(false)]);
+  return groupFragments(childFragments, maxWords).map((chunk) => wrapper(chunk)).filter(Boolean);
+}
+
 function serializeNode(node) {
   if (node.nodeType === 1) {
     return node.outerHTML.trim();
@@ -83,7 +110,7 @@ function escapeHtml(value) {
 }
 
 function groupFragments(fragments, maxWords) {
-  const normalizedMaxWords = Math.max(200, Number.parseInt(maxWords, 10) || 1200);
+  const normalizedMaxWords = normalizeMaxWords(maxWords);
   const chunks = [];
   let currentFragments = [];
   let currentWords = 0;
@@ -106,6 +133,10 @@ function groupFragments(fragments, maxWords) {
   }
 
   return chunks.filter(Boolean);
+}
+
+function normalizeMaxWords(maxWords) {
+  return Math.max(200, Number.parseInt(maxWords, 10) || 1200);
 }
 
 function countWords(text) {
