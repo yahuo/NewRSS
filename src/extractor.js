@@ -5,6 +5,9 @@ const { withProxy } = require('./http-client');
 const { stripHtml } = require('./utils');
 
 const MIN_CONTENT_TEXT_LENGTH = 280;
+const ARTICLE_ACCEPT_HEADER =
+  'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7';
+const ARTICLE_ACCEPT_LANGUAGE_HEADER = 'en-US,en;q=0.9';
 const TRUNCATED_CONTENT_PATTERNS = [
   /\bread the full story at\b/i,
   /\bcontinue reading\b/i,
@@ -240,7 +243,8 @@ const fetchHtml = async (url, options) => {
   const cookieHeader = resolveArticleCookieHeader(url, options);
   const headers = {
     'user-agent': options.userAgent,
-    accept: 'text/html,application/xhtml+xml',
+    accept: ARTICLE_ACCEPT_HEADER,
+    'accept-language': ARTICLE_ACCEPT_LANGUAGE_HEADER,
   };
 
   if (cookieHeader) {
