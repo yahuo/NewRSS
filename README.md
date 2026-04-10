@@ -153,6 +153,38 @@ curl -X POST http://localhost:8787/api/read-later \
 
 管理页会把这个 managed feed 固定放到 `Read Later` 目录下，并支持逐条删除 read-later 条目。
 
+## 订阅站点 Cookie
+
+如果某些站点的 RSS 能看见标题，但正文抓取会被 `403` 或登录墙拦住，可以给 NewRSS 配置文章抓取 cookie。这样服务端抓正文时会只对匹配域名带上这些 cookie。
+
+推荐方式是提供一个 JSON 文件：
+
+```json
+{
+  "domains": {
+    "nytimes.com": {
+      "NYT-S": "your-value",
+      "nyt-a": "your-value"
+    }
+  }
+}
+```
+
+然后设置：
+
+```bash
+ARTICLE_COOKIE_FILE=./data/article-cookies.json
+```
+
+也支持直接给单个域名传 cookie header：
+
+```bash
+ARTICLE_COOKIE_DOMAIN=nytimes.com
+ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
+```
+
+`ARTICLE_COOKIE_FILE` 也兼容常见的浏览器 cookie 导出 JSON 数组格式，只要里面包含 `domain` / `name` / `value` 字段即可。
+
 ## 常用环境变量
 
 - `APP_BASE_URL`
@@ -199,6 +231,12 @@ curl -X POST http://localhost:8787/api/read-later \
   上游抓取超时
 - `UPSTREAM_PROXY_URL`
   给 RSS 抓取和文章页抓取统一走代理，支持 `http://` 和 `socks5://`
+- `ARTICLE_COOKIE_FILE`
+  可选，文章页抓取 cookie 文件；按域名匹配后只发送到对应站点，适合 NYT 这类订阅站点
+- `ARTICLE_COOKIE_DOMAIN`
+  可选，配合 `ARTICLE_COOKIE_HEADER` 使用，指定这份 cookie 对哪个域名生效
+- `ARTICLE_COOKIE_HEADER`
+  可选，给单个域名直接设置 `Cookie` 请求头
 
 ## 当前限制
 
@@ -206,6 +244,7 @@ curl -X POST http://localhost:8787/api/read-later \
 - 某些站点只适合摘要模式，不适合全文抓取
 - 少数站点可能需要站点级规则或浏览器抓取回退
 - X 页面依赖你自己的登录态 cookie；如果没有提供，X 专用导入会失败
+- 某些订阅站点需要你额外提供文章页 cookie，否则服务端正文抓取仍可能返回 `403`
 - 配置 `GEMINI_API_KEY` 后，英文内容会在导入或刷新时额外调用 Gemini 翻译，速度会变慢一些
 - 当前是单进程服务，适合个人或家庭自用
 
@@ -348,6 +387,38 @@ For X/Twitter URLs, `auto` prefers NewRSS's built-in X importer and falls back o
 When `translate` is `false`, the item is stored as original content only even if Gemini translation is configured.
 The admin page keeps this managed feed under the `Read Later` folder and supports deleting individual read-later items.
 
+## Subscriber Cookies
+
+If a site exposes an RSS feed but blocks article-page fetching behind a `403` or login wall, NewRSS can send article-fetch cookies only to matching domains.
+
+The preferred option is a JSON file:
+
+```json
+{
+  "domains": {
+    "nytimes.com": {
+      "NYT-S": "your-value",
+      "nyt-a": "your-value"
+    }
+  }
+}
+```
+
+Then configure:
+
+```bash
+ARTICLE_COOKIE_FILE=./data/article-cookies.json
+```
+
+You can also pass a single-domain cookie header directly:
+
+```bash
+ARTICLE_COOKIE_DOMAIN=nytimes.com
+ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
+```
+
+`ARTICLE_COOKIE_FILE` also accepts common browser-export JSON arrays when entries include `domain`, `name`, and `value`.
+
 ## Common Environment Variables
 
 - `APP_BASE_URL`
@@ -394,6 +465,12 @@ The admin page keeps this managed feed under the `Read Later` folder and support
   Upstream fetch timeout
 - `UPSTREAM_PROXY_URL`
   Proxy used for RSS fetches and article-page fetches; supports `http://` and `socks5://`
+- `ARTICLE_COOKIE_FILE`
+  Optional article-fetch cookie file. Cookies are matched by domain and only sent to matching sites
+- `ARTICLE_COOKIE_DOMAIN`
+  Optional domain used together with `ARTICLE_COOKIE_HEADER`
+- `ARTICLE_COOKIE_HEADER`
+  Optional raw `Cookie` header for a single article domain
 
 ## Current Limitations
 
@@ -401,5 +478,6 @@ The admin page keeps this managed feed under the `Read Later` folder and support
 - Some feeds are only practical in summary mode
 - A few sites may require site-specific rules or browser-based fallback
 - X importing depends on your own authenticated X cookies
+- Some subscriber-only publishers still need you to provide article cookies, otherwise server-side extraction may return `403`
 - Importing or refreshing English content is slower when Gemini translation is enabled
 - The current runtime model is a single-process service intended for personal or home use

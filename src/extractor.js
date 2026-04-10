@@ -1,5 +1,6 @@
 const { JSDOM, VirtualConsole } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
+const { resolveArticleCookieHeader } = require('./article-cookies');
 const { withProxy } = require('./http-client');
 const { stripHtml } = require('./utils');
 
@@ -236,13 +237,19 @@ const looksLikeFailureShell = (html) => {
 const fetchHtml = async (url, options) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+  const cookieHeader = resolveArticleCookieHeader(url, options);
+  const headers = {
+    'user-agent': options.userAgent,
+    accept: 'text/html,application/xhtml+xml',
+  };
+
+  if (cookieHeader) {
+    headers.cookie = cookieHeader;
+  }
 
   try {
     const response = await fetch(url, {
-      headers: {
-        'user-agent': options.userAgent,
-        accept: 'text/html,application/xhtml+xml',
-      },
+      headers,
       redirect: 'follow',
       signal: controller.signal,
       ...withProxy(options.upstreamProxyUrl),

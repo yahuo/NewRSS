@@ -249,6 +249,9 @@ class FeedService {
           timeoutMs: this.config.httpTimeoutMs,
           userAgent: this.config.userAgent,
           upstreamProxyUrl: this.config.upstreamProxyUrl,
+          articleCookieFile: this.config.articleCookieFile,
+          articleCookieDomain: this.config.articleCookieDomain,
+          articleCookieHeader: this.config.articleCookieHeader,
         });
 
         const sourceTitle = item.title || resolved.title || item.link || 'Untitled';
