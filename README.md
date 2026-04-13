@@ -229,6 +229,8 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
   输出 feed 最多保留多少条，默认 `50`
 - `HTTP_TIMEOUT_MS`
   上游抓取超时
+- `USER_AGENT`
+  可选，覆盖文章页抓取默认使用的浏览器 User-Agent；默认会使用内置浏览器 UA，兼容 `archive.md` 这类会拦截脚本 UA 的站点
 - `UPSTREAM_PROXY_URL`
   给 RSS 抓取和文章页抓取统一走代理，支持 `http://` 和 `socks5://`
 - `ARTICLE_COOKIE_FILE`
@@ -463,6 +465,8 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
   Max items kept in generated feeds, default `50`
 - `HTTP_TIMEOUT_MS`
   Upstream fetch timeout
+- `USER_AGENT`
+  Optional override for the browser-style User-Agent used for article-page fetches; by default NewRSS uses a built-in browser UA so sites like `archive.md` do not reject the request as a script client
 - `UPSTREAM_PROXY_URL`
   Proxy used for RSS fetches and article-page fetches; supports `http://` and `socks5://`
 - `ARTICLE_COOKIE_FILE`

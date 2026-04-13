@@ -5,6 +5,9 @@ const toInteger = (value, fallback) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const DEFAULT_ARTICLE_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
+
 const appRoot = process.cwd();
 
 const config = {
@@ -24,7 +27,7 @@ const config = {
   refreshIntervalMinutes: toInteger(process.env.REFRESH_INTERVAL_MINUTES, 30),
   httpTimeoutMs: toInteger(process.env.HTTP_TIMEOUT_MS, 15000),
   refreshOnBoot: process.env.REFRESH_ON_BOOT !== 'false',
-  userAgent: process.env.USER_AGENT || 'NewRSS/0.1 (+https://tailscale.local)',
+  userAgent: process.env.USER_AGENT || DEFAULT_ARTICLE_USER_AGENT,
   upstreamProxyUrl: process.env.UPSTREAM_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '',
   articleCookieFile: process.env.ARTICLE_COOKIE_FILE || '',
   articleCookieDomain: process.env.ARTICLE_COOKIE_DOMAIN || '',
