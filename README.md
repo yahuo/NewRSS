@@ -153,6 +153,14 @@ curl -X POST http://localhost:8787/api/read-later \
 
 管理页会把这个 managed feed 固定放到 `Read Later` 目录下，并支持逐条删除 read-later 条目。
 
+### Chrome 一键保存扩展
+
+仓库里附带了一个可直接加载的 Chrome unpacked 扩展，目录在 `extensions/read-later-chrome`。
+
+- 点击工具栏图标就会把当前 `http/https` 页面保存到 `Read Later`
+- 默认参数固定为 `mode=auto`、`translate=true`
+- 安装步骤和排查说明见 `extensions/read-later-chrome/README.md`
+
 ## 订阅站点 Cookie
 
 如果某些站点的 RSS 能看见标题，但正文抓取会被 `403` 或登录墙拦住，可以给 NewRSS 配置文章抓取 cookie。这样服务端抓正文时会只对匹配域名带上这些 cookie。
@@ -388,6 +396,14 @@ Optional fields:
 For X/Twitter URLs, `auto` prefers NewRSS's built-in X importer and falls back only when needed.
 When `translate` is `false`, the item is stored as original content only even if Gemini translation is configured.
 The admin page keeps this managed feed under the `Read Later` folder and supports deleting individual read-later items.
+
+### Chrome One-Click Extension
+
+The repo also includes an unpacked Chrome extension under `extensions/read-later-chrome`.
+
+- Click the toolbar icon to save the current `http/https` page into `Read Later`
+- It always sends `mode=auto` and `translate=true`
+- Installation and troubleshooting are documented in `extensions/read-later-chrome/README.md`
 
 ## Subscriber Cookies
 
