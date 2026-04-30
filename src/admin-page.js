@@ -343,7 +343,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
             </label>
             <button class="primary" type="submit">保存源</button>
             <div class="hint">名称为空时，会根据 URL 自动生成一个 slug。同名保存会更新地址、目录和翻译设置。</div>
-            <div class="hint">勾选后，后续刷新这个 RSS 源时会自动把英文正文翻译成中文；需要先配置 <code>GEMINI_API_KEY</code>。</div>
+            <div class="hint">勾选后，后续刷新这个 RSS 源时会自动把英文正文翻译成中文；需要配置 Gemini API key 或 Codex OAuth。</div>
             <div class="status" id="status"></div>
           </form>
           <hr class="section-divider" />

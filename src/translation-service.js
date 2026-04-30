@@ -1,3 +1,6 @@
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { buildHtmlTranslationPlan } = require('./html-chunker');
 const { renderMarkdown } = require('./markdown-renderer');
 const { chunkMarkdown } = require('./markdown-chunker');
@@ -5,6 +8,9 @@ const { extractMarkdownHeadingTitle, normalizeDerivedTitle, normalizeWhitespace,
 
 const ENGLISH_SAMPLE_LIMIT = 6_000;
 const MAX_TRANSLATABLE_CHARS = 120_000;
+const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
+const CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120;
 
 class TranslationService {
   constructor(config) {
@@ -12,6 +18,10 @@ class TranslationService {
   }
 
   isEnabled() {
+    if (getTranslationProvider(this.config) === 'codex-oauth') {
+      return fs.existsSync(resolveCodexAuthFile(this.config));
+    }
+
     return Boolean(String(this.config.geminiApiKey || '').trim());
   }
 
@@ -67,23 +77,21 @@ class TranslationService {
         sourceUrl,
         targetLanguage: this.config.translateTargetLanguage,
       });
-      const response = await callGemini({
-        apiKey: this.config.geminiApiKey,
-        model: this.config.geminiModel,
-        timeoutMs: this.config.geminiTimeoutMs,
+      const response = await callTranslationJson({
+        config: this.config,
         prompt,
       });
 
       const translatedTitle = normalizeWhitespace(response.translatedTitle || '');
       const translatedContentHtml = String(response.translatedContentHtml || '').trim();
       if (!translatedTitle || !translatedContentHtml) {
-        throw new Error('Gemini translation returned incomplete fields');
+        throw new Error('Translation provider returned incomplete fields');
       }
 
       return {
         translatedTitle: truncate(translatedTitle, 120),
         translatedContentHtml,
-        provider: this.config.geminiModel,
+        provider: getTranslationModel(this.config),
       };
     } catch (error) {
       if (isAbortLikeError(error) && htmlPlan.chunks.length > 1) {
@@ -148,15 +156,13 @@ class TranslationService {
     return {
       translatedTitle: translatedTitle || truncate(normalizeWhitespace(sourceTitle || ''), 120),
       translatedContentHtml: rendered.contentHtml,
-      provider: `${this.config.geminiModel}-md-chunked`,
+      provider: `${getTranslationModel(this.config)}-md-chunked`,
     };
   }
 
   async translateTitle({ title, sourceUrl }) {
-    const text = await callGeminiText({
-      apiKey: this.config.geminiApiKey,
-      model: this.config.geminiModel,
-      timeoutMs: this.config.geminiTimeoutMs,
+    const text = await callTranslationText({
+      config: this.config,
       prompt: [
         `Translate the following article title into ${this.config.translateTargetLanguage}.`,
         'Return only the translated title on a single line.',
@@ -171,10 +177,8 @@ class TranslationService {
   }
 
   async translateMarkdownChunk({ sourceTitle, sourceUrl, markdown, chunkIndex, chunkCount }) {
-    const translated = await callGeminiText({
-      apiKey: this.config.geminiApiKey,
-      model: this.config.geminiModel,
-      timeoutMs: this.config.geminiTimeoutMs,
+    const translated = await callTranslationText({
+      config: this.config,
       prompt: buildMarkdownChunkPrompt({
         sourceTitle,
         sourceUrl,
@@ -218,15 +222,13 @@ class TranslationService {
     return {
       translatedTitle: translatedTitle || truncate(normalizeWhitespace(sourceTitle || ''), 120),
       translatedContentHtml,
-      provider: `${this.config.geminiModel}-html-chunked`,
+      provider: `${getTranslationModel(this.config)}-html-chunked`,
     };
   }
 
   async translateHtmlChunk({ sourceTitle, sourceUrl, chunkHtml, chunkIndex, chunkCount }) {
-    const translated = await callGeminiText({
-      apiKey: this.config.geminiApiKey,
-      model: this.config.geminiModel,
-      timeoutMs: this.config.geminiTimeoutMs,
+    const translated = await callTranslationText({
+      config: this.config,
       prompt: buildHtmlChunkPrompt({
         sourceTitle,
         sourceUrl,
@@ -242,6 +244,44 @@ class TranslationService {
 }
 
 module.exports = TranslationService;
+
+function getTranslationProvider(config) {
+  const provider = String(config.translationProvider || 'gemini').trim().toLowerCase();
+  return provider || 'gemini';
+}
+
+function getTranslationModel(config) {
+  return getTranslationProvider(config) === 'codex-oauth'
+    ? String(config.codexModel || 'openai-codex/gpt-5.5').trim()
+    : String(config.geminiModel || 'gemini-2.5-flash').trim();
+}
+
+async function callTranslationJson({ config, prompt }) {
+  if (getTranslationProvider(config) === 'codex-oauth') {
+    const text = await callCodexText({ config, prompt });
+    return JSON.parse(stripFenceWrapperText(text));
+  }
+
+  return callGemini({
+    apiKey: config.geminiApiKey,
+    model: config.geminiModel,
+    timeoutMs: config.geminiTimeoutMs,
+    prompt,
+  });
+}
+
+async function callTranslationText({ config, prompt }) {
+  if (getTranslationProvider(config) === 'codex-oauth') {
+    return callCodexText({ config, prompt });
+  }
+
+  return callGeminiText({
+    apiKey: config.geminiApiKey,
+    model: config.geminiModel,
+    timeoutMs: config.geminiTimeoutMs,
+    prompt,
+  });
+}
 
 async function fetchGeminiContent({ apiKey, model, timeoutMs, prompt, generationConfig = {} }) {
   const controller = new AbortController();
@@ -326,6 +366,286 @@ async function callGemini({ apiKey, model, timeoutMs, prompt }) {
 
 async function callGeminiText({ apiKey, model, timeoutMs, prompt }) {
   return fetchGeminiContent({ apiKey, model, timeoutMs, prompt });
+}
+
+async function callCodexText({ config, prompt }) {
+  const auth = await resolveCodexAuth(config);
+  const baseUrl = String(config.codexBaseUrl || 'https://chatgpt.com/backend-api/codex').replace(/\/+$/, '');
+  const timeoutMs = Number(config.codexTimeoutMs) || Number(config.geminiTimeoutMs) || 90_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${baseUrl}/responses`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${auth.accessToken}`,
+        ...buildCodexHeaders(auth.accessToken),
+      },
+      body: JSON.stringify({
+        model: getCodexApiModel(getTranslationModel(config)),
+        instructions: 'You are a precise translation engine. Follow the user prompt exactly and return only the requested translation output.',
+        input: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'input_text',
+                text: prompt,
+              },
+            ],
+          },
+        ],
+        store: false,
+        stream: true,
+      }),
+    });
+
+    const raw = await response.text();
+    if (!response.ok) {
+      const payload = parseJson(raw);
+      const message =
+        payload?.detail ||
+        payload?.error?.message ||
+        payload?.error?.code ||
+        `Codex request failed with status ${response.status}`;
+      throw new Error(message);
+    }
+
+    const text = extractCodexStreamText(raw) || extractCodexResponseText(parseJson(raw));
+    if (!text) {
+      throw new Error('Codex returned no text');
+    }
+
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveCodexAuth(config) {
+  const authFile = resolveCodexAuthFile(config);
+  const payload = readCodexAuthFile(authFile);
+  const tokens = payload.tokens;
+  const accessToken = String(tokens.access_token || '').trim();
+  const refreshToken = String(tokens.refresh_token || '').trim();
+  if (!accessToken || !refreshToken) {
+    throw new Error(`Codex auth file is missing tokens: ${authFile}`);
+  }
+
+  if (!isJwtExpiring(accessToken, CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS)) {
+    return { accessToken, authFile };
+  }
+
+  const refreshed = await refreshCodexToken({
+    refreshToken,
+    timeoutMs: Number(config.codexTimeoutMs) || Number(config.geminiTimeoutMs) || 90_000,
+  });
+  payload.tokens = {
+    ...tokens,
+    access_token: refreshed.accessToken,
+    refresh_token: refreshed.refreshToken || refreshToken,
+  };
+  writeCodexAuthFile(authFile, payload);
+  return { accessToken: payload.tokens.access_token, authFile };
+}
+
+function resolveCodexAuthFile(config) {
+  const configured = String(config.codexAuthFile || '').trim();
+  if (configured) {
+    return expandHome(configured);
+  }
+
+  const codexHome = process.env.CODEX_HOME ? expandHome(process.env.CODEX_HOME) : path.join(os.homedir(), '.codex');
+  return path.join(codexHome, 'auth.json');
+}
+
+function readCodexAuthFile(authFile) {
+  let payload;
+  try {
+    payload = JSON.parse(fs.readFileSync(authFile, 'utf8'));
+  } catch (error) {
+    throw new Error(`Unable to read Codex auth file ${authFile}: ${error.message}`);
+  }
+
+  if (!payload || typeof payload !== 'object' || !payload.tokens || typeof payload.tokens !== 'object') {
+    throw new Error(`Codex auth file has an unsupported shape: ${authFile}`);
+  }
+
+  return payload;
+}
+
+function writeCodexAuthFile(authFile, payload) {
+  const directory = path.dirname(authFile);
+  const temporary = path.join(directory, `.auth.json.${process.pid}.${Date.now()}.tmp`);
+  fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, authFile);
+}
+
+async function refreshCodexToken({ refreshToken, timeoutMs }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(CODEX_OAUTH_TOKEN_URL, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: CODEX_OAUTH_CLIENT_ID,
+      }),
+    });
+
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const message =
+        payload?.error?.message ||
+        payload?.error_description ||
+        payload?.error ||
+        `Codex token refresh failed with status ${response.status}`;
+      throw new Error(message);
+    }
+
+    const accessToken = String(payload?.access_token || '').trim();
+    if (!accessToken) {
+      throw new Error('Codex token refresh returned no access_token');
+    }
+
+    return {
+      accessToken,
+      refreshToken: String(payload?.refresh_token || '').trim(),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildCodexHeaders(accessToken) {
+  const headers = {
+    'user-agent': 'codex_cli_rs/0.0.0 (NewRSS)',
+    originator: 'codex_cli_rs',
+  };
+  const claims = decodeJwtPayload(accessToken);
+  const accountId = claims?.['https://api.openai.com/auth']?.chatgpt_account_id;
+  if (typeof accountId === 'string' && accountId.trim()) {
+    headers['ChatGPT-Account-ID'] = accountId.trim();
+  }
+
+  return headers;
+}
+
+function getCodexApiModel(model) {
+  const value = String(model || '').trim();
+  return value.startsWith('openai-codex/') ? value.slice('openai-codex/'.length) : value;
+}
+
+function extractCodexStreamText(raw) {
+  const events = parseServerSentEvents(raw);
+  const deltas = [];
+  let doneText = '';
+
+  for (const event of events) {
+    const payload = parseJson(event.data);
+    if (!payload) {
+      continue;
+    }
+
+    if (payload.type === 'response.output_text.delta' && typeof payload.delta === 'string') {
+      deltas.push(payload.delta);
+    }
+
+    if (payload.type === 'response.output_text.done' && typeof payload.text === 'string') {
+      doneText = payload.text;
+    }
+  }
+
+  return (doneText || deltas.join('')).trim();
+}
+
+function parseServerSentEvents(raw) {
+  return String(raw || '')
+    .split(/\n\n+/)
+    .map((block) => {
+      const dataLines = [];
+      for (const line of block.split(/\r?\n/)) {
+        if (line.startsWith('data:')) {
+          dataLines.push(line.slice(5).trimStart());
+        }
+      }
+      return { data: dataLines.join('\n') };
+    })
+    .filter((event) => event.data);
+}
+
+function extractCodexResponseText(payload) {
+  if (typeof payload?.output_text === 'string' && payload.output_text.trim()) {
+    return payload.output_text.trim();
+  }
+
+  const output = Array.isArray(payload?.output) ? payload.output : [];
+  const parts = [];
+  for (const item of output) {
+    const content = Array.isArray(item?.content) ? item.content : [];
+    for (const part of content) {
+      const text = part?.text || part?.content;
+      if (typeof text === 'string') {
+        parts.push(text);
+      }
+    }
+  }
+
+  return parts.join('').trim();
+}
+
+function parseJson(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function isJwtExpiring(token, skewSeconds) {
+  const claims = decodeJwtPayload(token);
+  const exp = Number(claims?.exp);
+  if (!Number.isFinite(exp) || exp <= 0) {
+    return false;
+  }
+
+  return Date.now() / 1000 >= exp - Number(skewSeconds || 0);
+}
+
+function decodeJwtPayload(token) {
+  const parts = String(token || '').split('.');
+  if (parts.length < 2) {
+    return null;
+  }
+
+  try {
+    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = payload.padEnd(Math.ceil(payload.length / 4) * 4, '=');
+    return JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function expandHome(value) {
+  const text = String(value || '');
+  if (text === '~') {
+    return os.homedir();
+  }
+  if (text.startsWith('~/')) {
+    return path.join(os.homedir(), text.slice(2));
+  }
+  return text;
 }
 
 function buildTranslationPrompt({ title, contentHtml, sourceUrl, targetLanguage }) {

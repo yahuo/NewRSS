@@ -40,11 +40,16 @@ const config = {
   xUserAgent: process.env.X_USER_AGENT || '',
   xBearerToken: process.env.X_BEARER_TOKEN || '',
   xClientTransactionId: process.env.X_CLIENT_TRANSACTION_ID || '',
+  translationProvider: process.env.TRANSLATION_PROVIDER || 'gemini',
   geminiApiKey: process.env.GEMINI_API_KEY || '',
   geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
   geminiTimeoutMs: toInteger(process.env.GEMINI_TIMEOUT_MS, 90000),
   geminiChunkMaxWords: toInteger(process.env.GEMINI_CHUNK_MAX_WORDS, 1200),
   geminiChunkConcurrency: toInteger(process.env.GEMINI_CHUNK_CONCURRENCY, 3),
+  codexAuthFile: process.env.CODEX_AUTH_FILE || '',
+  codexModel: process.env.CODEX_MODEL || 'openai-codex/gpt-5.5',
+  codexBaseUrl: process.env.CODEX_BASE_URL || 'https://chatgpt.com/backend-api/codex',
+  codexTimeoutMs: toInteger(process.env.CODEX_TIMEOUT_MS, toInteger(process.env.GEMINI_TIMEOUT_MS, 90000)),
   translateTargetLanguage: process.env.TRANSLATE_TARGET_LANGUAGE || 'Simplified Chinese',
 };
 

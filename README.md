@@ -36,7 +36,7 @@ NewRSS 是一个面向 `Reeder` 等 RSS 阅读器的自托管 Reader View 工具
 - OPML 导入：`POST /api/opml/import`
 - OPML 导出：`GET /opml.xml`
 
-新增或更新源时，可以额外传 `translateEnabled: true`。开启后，后续刷新该 RSS 源时会自动把英文正文翻译成中文；没有配置 `GEMINI_API_KEY` 时会保留原文。
+新增或更新源时，可以额外传 `translateEnabled: true`。开启后，后续刷新该 RSS 源时会自动把英文正文翻译成中文；没有配置翻译 provider 时会保留原文。
 
 ## 快速开始
 
@@ -221,10 +221,16 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
   可选，覆盖内置的 X 请求 User-Agent
 - `X_BEARER_TOKEN`
   可选，覆盖内置的 X 请求 Bearer Token
+- `TRANSLATION_PROVIDER`
+  可选，翻译 provider，默认 `gemini`；可设为 `codex-oauth` 复用 Codex CLI 的 OAuth 登录态
 - `GEMINI_API_KEY`
   可选，设置后会自动把英文的 read-later 内容以及开启 `translateEnabled` 的 RSS 源内容翻译为中文
 - `GEMINI_MODEL`
   可选，Gemini 模型名，默认 `gemini-2.5-flash`
+- `CODEX_AUTH_FILE`
+  可选，`TRANSLATION_PROVIDER=codex-oauth` 时读取的 Codex auth 文件，默认 `~/.codex/auth.json`
+- `CODEX_MODEL`
+  可选，Codex OAuth 模型名，默认 `openai-codex/gpt-5.5`
 - `TRANSLATE_TARGET_LANGUAGE`
   可选，目标语言，默认 `Simplified Chinese`
 - `REFRESH_INTERVAL_MINUTES`
@@ -255,7 +261,7 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
 - 少数站点可能需要站点级规则或浏览器抓取回退
 - X 页面依赖你自己的登录态 cookie；如果没有提供，X 专用导入会失败
 - 某些订阅站点需要你额外提供文章页 cookie，否则服务端正文抓取仍可能返回 `403`
-- 配置 `GEMINI_API_KEY` 后，英文内容会在导入或刷新时额外调用 Gemini 翻译，速度会变慢一些
+- 配置翻译 provider 后，英文内容会在导入或刷新时额外调用模型翻译，速度会变慢一些
 - 当前是单进程服务，适合个人或家庭自用
 
 ---
@@ -296,7 +302,7 @@ The default mode is “extract original content, no server-side translation”:
 - Import OPML: `POST /api/opml/import`
 - Export OPML: `GET /opml.xml`
 
-When creating or updating a feed, you can additionally send `translateEnabled: true`. Once enabled, future refreshes will automatically translate English article content into Chinese; if `GEMINI_API_KEY` is not configured, the original content is kept.
+When creating or updating a feed, you can additionally send `translateEnabled: true`. Once enabled, future refreshes will automatically translate English article content into Chinese; if no translation provider is configured, the original content is kept.
 
 ## Quick Start
 
@@ -465,10 +471,16 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
   Optional override for the built-in X request user agent
 - `X_BEARER_TOKEN`
   Optional override for the built-in X request bearer token
+- `TRANSLATION_PROVIDER`
+  Optional translation provider, default `gemini`; set to `codex-oauth` to reuse Codex CLI OAuth credentials
 - `GEMINI_API_KEY`
   Optional. When set, English read-later articles and feeds with `translateEnabled=true` are automatically translated
 - `GEMINI_MODEL`
   Optional Gemini model name, default `gemini-2.5-flash`
+- `CODEX_AUTH_FILE`
+  Optional Codex auth file for `TRANSLATION_PROVIDER=codex-oauth`, default `~/.codex/auth.json`
+- `CODEX_MODEL`
+  Optional Codex OAuth model name, default `openai-codex/gpt-5.5`
 - `TRANSLATE_TARGET_LANGUAGE`
   Optional target language, default `Simplified Chinese`
 - `REFRESH_INTERVAL_MINUTES`
