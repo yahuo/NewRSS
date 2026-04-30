@@ -124,6 +124,52 @@ test('codex-oauth provider refreshes expiring access token and persists rotated 
   }
 });
 
+test('codex-oauth JSON translation accepts fenced or prefixed JSON output', async () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'newrss-codex-json-'));
+  const authFile = path.join(temporaryDirectory, 'auth.json');
+  const accessToken = fakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 });
+  fs.writeFileSync(
+    authFile,
+    JSON.stringify({
+      tokens: {
+        access_token: accessToken,
+        refresh_token: 'refresh-token',
+      },
+    })
+  );
+
+  const previousFetch = global.fetch;
+  global.fetch = async () =>
+    textResponse([
+      'event: response.output_text.done',
+      'data: {"type":"response.output_text.done","text":"Here is the JSON:\\n```json\\n{\\\"translatedTitle\\\":\\\"中文标题\\\",\\\"translatedContentHtml\\\":\\\"<p>中文正文</p>\\\"}\\n```"}',
+      '',
+    ].join('\n'));
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'codex-oauth',
+      codexAuthFile: authFile,
+      codexModel: 'openai-codex/gpt-5.5',
+      codexTimeoutMs: 5000,
+      geminiChunkMaxWords: 2000,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+
+    const translated = await service.translateArticle({
+      sourceTitle: 'English article title',
+      contentHtml: '<p>This is a long enough English article body for the translation detector and direct JSON path.</p>',
+      sourceUrl: 'https://example.com/article',
+    });
+
+    assert.equal(translated.translatedTitle, '中文标题');
+    assert.equal(translated.translatedContentHtml, '<p>中文正文</p>');
+  } finally {
+    global.fetch = previousFetch;
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test('codex-oauth provider is disabled when the auth file is missing', () => {
   const service = new TranslationService({
     translationProvider: 'codex-oauth',

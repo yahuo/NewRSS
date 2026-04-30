@@ -259,7 +259,7 @@ function getTranslationModel(config) {
 async function callTranslationJson({ config, prompt }) {
   if (getTranslationProvider(config) === 'codex-oauth') {
     const text = await callCodexText({ config, prompt });
-    return JSON.parse(stripFenceWrapperText(text));
+    return parseTranslationJson(text);
   }
 
   return callGemini({
@@ -612,6 +612,60 @@ function parseJson(value) {
   }
 }
 
+function parseTranslationJson(text) {
+  const stripped = stripFenceWrapperText(text);
+  const direct = parseJson(stripped);
+  if (direct) {
+    return direct;
+  }
+
+  const objectText = extractFirstJsonObject(stripped);
+  const extracted = objectText ? parseJson(objectText) : null;
+  if (extracted) {
+    return extracted;
+  }
+
+  throw new Error('Translation provider returned invalid JSON');
+}
+
+function extractFirstJsonObject(text) {
+  const value = String(text || '');
+  const start = value.indexOf('{');
+  if (start === -1) {
+    return '';
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const char = value[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+    } else if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return value.slice(start, index + 1);
+      }
+    }
+  }
+
+  return '';
+}
+
 function isJwtExpiring(token, skewSeconds) {
   const claims = decodeJwtPayload(token);
   const exp = Number(claims?.exp);
@@ -657,7 +711,9 @@ function buildTranslationPrompt({ title, contentHtml, sourceUrl, targetLanguage 
     '- Translate visible text naturally for readers, not literally word-by-word.',
     '- Do not add wrappers like html/body/main/section unless already present.',
     '- Keep code, URLs, proper nouns, and publication names when appropriate.',
-    '- Return only valid JSON matching the schema.',
+    '- Return only valid JSON. Do not use markdown fences or add explanations.',
+    '- The JSON schema is exactly: {"translatedTitle":"...","translatedContentHtml":"..."}',
+    '- The translatedContentHtml value must contain the translated HTML fragment string.',
     '',
     `Source URL: ${sourceUrl || ''}`,
     `Title: ${title || ''}`,
