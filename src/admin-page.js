@@ -185,6 +185,26 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         color: var(--accent);
         word-break: break-all;
       }
+      .translation-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
+      .switch-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 62px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        box-shadow: none;
+        font-size: 0.84rem;
+      }
+      .switch-button.on {
+        background: rgba(15, 92, 154, 0.09);
+        color: var(--accent);
+      }
       .row-actions {
         display: flex;
         flex-wrap: wrap;
@@ -550,9 +570,10 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
 
         const groups = new Map();
         for (const feed of sourceFeeds) {
-          const folder = normalizeFolder(feed.folder) || '未分类';
-          if (!groups.has(folder)) groups.set(folder, []);
-          groups.get(folder).push({ ...feed, folder });
+          const folder = normalizeFolder(feed.folder);
+          const folderLabel = folder || '未分类';
+          if (!groups.has(folderLabel)) groups.set(folderLabel, []);
+          groups.get(folderLabel).push({ ...feed, folder });
         }
 
         root.innerHTML = sourceFeeds.length
@@ -582,7 +603,10 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
                         <div>名称：\${escapeHtml(feed.name)}</div>
                         <div>来源：\${feed.isManaged ? '本地导入' : \`<a href="\${escapeHtml(feed.sourceUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.sourceUrl)}</a>\`}</div>
                         <div>Feed：<a href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.feedUrl)}</a></div>
-                        <div>自动翻译英文内容：\${feed.translateEnabled ? '开启' : '关闭'}</div>
+                        <div class="translation-row">
+                          <span>自动翻译英文内容：\${feed.translateEnabled ? '开启' : '关闭'}</span>
+                          <button class="switch-button \${feed.translateEnabled ? 'on' : ''}" type="button" role="switch" aria-checked="\${feed.translateEnabled ? 'true' : 'false'}" data-action="toggle-translate" data-name="\${escapeHtml(feed.name)}" data-source-url="\${escapeHtml(feed.sourceUrl)}" data-folder="\${escapeHtml(feed.folder || '')}" data-translate-enabled="\${feed.translateEnabled ? 'true' : 'false'}">\${feed.translateEnabled ? '关闭' : '开启'}</button>
+                        </div>
                         <div>最近刷新：\${escapeHtml(feed.lastRefreshedAt || '未刷新')}</div>
                         <div>已抓取：\${Number(feed.entryCount || 0)} 篇，最近失败：\${Number(feed.errorCount || 0)} 篇</div>
                       </div>
@@ -623,6 +647,21 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
                 const response = await fetch(\`/api/feeds/\${encodeURIComponent(name)}/refresh\`, { method: 'POST' });
                 const data = await response.json();
                 if (!response.ok || !data.ok) throw new Error(data.error || '刷新失败');
+              } else if (action === 'toggle-translate') {
+                const nextTranslateEnabled = button.dataset.translateEnabled !== 'true';
+                setStatus(nextTranslateEnabled ? '正在开启自动翻译…' : '正在关闭自动翻译…');
+                const response = await fetch('/api/feeds', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({
+                    name,
+                    sourceUrl: button.dataset.sourceUrl || '',
+                    folder: button.dataset.folder || '',
+                    translateEnabled: nextTranslateEnabled,
+                  }),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.ok) throw new Error(data.error || '保存翻译设置失败');
               }
               setStatus('完成');
               await reload();
