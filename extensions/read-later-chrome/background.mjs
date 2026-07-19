@@ -12,6 +12,8 @@ import {
 
 const NOTIFICATION_TARGET_PREFIX = 'notificationTarget:';
 const inFlightTabIds = new Set();
+const badgeClearTimeouts = new Map();
+const BADGE_CLEAR_DELAY_MS = 3500;
 
 chrome.action.onClicked.addListener((tab) => {
   void handleActionClick(tab);
@@ -29,6 +31,9 @@ async function handleActionClick(tab) {
   const tabId = Number.isInteger(tab?.id) ? tab.id : null;
 
   if (!isSupportedPageUrl(tab?.url)) {
+    if (tabId !== null) {
+      await setFailureBadge(tabId);
+    }
     await showNotification({
       title: '无法保存当前页面',
       message: unsupportedUrlMessage(tab?.url),
@@ -57,8 +62,15 @@ async function handleActionClick(tab) {
     if (result.articleUrl) {
       await rememberNotificationTarget(notificationId, result.articleUrl);
     }
+
+    if (tabId !== null) {
+      await setSuccessBadge(tabId);
+    }
   } catch (error) {
     console.error('[read-later extension] save failed', error);
+    if (tabId !== null) {
+      await setFailureBadge(tabId);
+    }
     await showNotification({
       title: '保存失败',
       message: humanizeSaveError(error),
@@ -66,7 +78,6 @@ async function handleActionClick(tab) {
   } finally {
     if (tabId !== null) {
       inFlightTabIds.delete(tabId);
-      await clearSavingBadge(tabId);
     }
   }
 }
@@ -149,6 +160,7 @@ async function clearNotificationTarget(notificationId) {
 }
 
 async function setSavingBadge(tabId) {
+  clearBadgeResetTimeout(tabId);
   await setBadgeBackgroundColor({
     color: '#0f5c9a',
     tabId,
@@ -159,11 +171,57 @@ async function setSavingBadge(tabId) {
   });
 }
 
-async function clearSavingBadge(tabId) {
+async function setSuccessBadge(tabId) {
+  clearBadgeResetTimeout(tabId);
+  await setBadgeBackgroundColor({
+    color: '#1f7a1f',
+    tabId,
+  });
+  await setBadgeText({
+    tabId,
+    text: 'OK',
+  });
+  scheduleBadgeReset(tabId);
+}
+
+async function setFailureBadge(tabId) {
+  clearBadgeResetTimeout(tabId);
+  await setBadgeBackgroundColor({
+    color: '#b42318',
+    tabId,
+  });
+  await setBadgeText({
+    tabId,
+    text: '!',
+  });
+  scheduleBadgeReset(tabId);
+}
+
+async function clearBadge(tabId) {
+  clearBadgeResetTimeout(tabId);
   await setBadgeText({
     tabId,
     text: '',
   });
+}
+
+function scheduleBadgeReset(tabId) {
+  clearBadgeResetTimeout(tabId);
+  const timeoutId = setTimeout(() => {
+    badgeClearTimeouts.delete(tabId);
+    void clearBadge(tabId);
+  }, BADGE_CLEAR_DELAY_MS);
+  badgeClearTimeouts.set(tabId, timeoutId);
+}
+
+function clearBadgeResetTimeout(tabId) {
+  const timeoutId = badgeClearTimeouts.get(tabId);
+  if (!timeoutId) {
+    return;
+  }
+
+  clearTimeout(timeoutId);
+  badgeClearTimeouts.delete(tabId);
 }
 
 function createNotification(notificationId, options) {

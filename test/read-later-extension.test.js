@@ -55,6 +55,19 @@ test('buildSaveSuccessNotification distinguishes new and existing entries', asyn
   );
 });
 
+test('unsupportedUrlMessage explains missing and non-http URLs', async () => {
+  const { unsupportedUrlMessage } = await helpersPromise;
+
+  assert.equal(
+    unsupportedUrlMessage(''),
+    '当前标签页没有可保存的网页地址。'
+  );
+  assert.equal(
+    unsupportedUrlMessage('chrome://extensions'),
+    '当前页面不支持保存：chrome://extensions'
+  );
+});
+
 test('humanizeSaveError maps timeout, network, and api errors to readable text', async () => {
   const { humanizeSaveError } = await helpersPromise;
 
