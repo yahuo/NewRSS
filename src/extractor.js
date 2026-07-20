@@ -1,6 +1,7 @@
 const { JSDOM, VirtualConsole } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
 const { resolveArticleCookieHeader } = require('./article-cookies');
+const { getArticleStrategy } = require('./article-strategies');
 const { withProxy } = require('./http-client');
 const { stripHtml } = require('./utils');
 
@@ -237,12 +238,12 @@ const looksLikeFailureShell = (html) => {
   return FAILURE_SHELL_PATTERNS.some((pattern) => pattern.test(text));
 };
 
-const fetchHtml = async (url, options) => {
+const fetchHtml = async (url, options, strategy) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
   const cookieHeader = resolveArticleCookieHeader(url, options);
   const headers = {
-    'user-agent': options.userAgent,
+    'user-agent': strategy?.userAgent || options.userAgent,
     accept: ARTICLE_ACCEPT_HEADER,
     'accept-language': ARTICLE_ACCEPT_LANGUAGE_HEADER,
   };
@@ -269,13 +270,14 @@ const fetchHtml = async (url, options) => {
   }
 };
 
-const extractFromPage = async (url, options) => {
-  const html = await fetchHtml(url, options);
+const extractFromPage = async (url, options, strategy) => {
+  const html = await fetchHtml(url, options, strategy);
   const virtualConsole = new VirtualConsole();
   const dom = new JSDOM(sanitizeHtmlForReadability(html), {
     url,
     virtualConsole,
   });
+  strategy?.prepareDocument?.(dom.window.document);
   const fallbackLeadImageHtml = options.fallbackLeadImageHtml || extractLeadImageFromDocument(dom.window.document, url);
   const reader = new Readability(dom.window.document);
   const article = reader.parse();
@@ -300,8 +302,9 @@ const extractFromPage = async (url, options) => {
 };
 
 const resolveArticleContent = async (item, options) => {
+  const strategy = item.link ? getArticleStrategy(item.link) : null;
   const embedded = extractEmbeddedContent(item);
-  if (embedded) {
+  if (embedded && !strategy?.preferPage) {
     return embedded;
   }
 
@@ -314,10 +317,14 @@ const resolveArticleContent = async (item, options) => {
     item.link
   );
 
-  return extractFromPage(item.link, {
-    ...options,
-    fallbackLeadImageHtml,
-  });
+  return extractFromPage(
+    item.link,
+    {
+      ...options,
+      fallbackLeadImageHtml,
+    },
+    strategy
+  );
 };
 
 module.exports = {
