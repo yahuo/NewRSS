@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { JSDOM } = require('jsdom');
 
 const { renderAdminPage } = require('../src/admin-page');
 
@@ -41,4 +42,55 @@ test('admin feed list renders a per-feed translation switch', () => {
   assert.ok(html.includes("${feed.translateEnabled ? '关闭' : '开启'}</button>"));
   assert.match(html, /fetch\('\/api\/feeds'/);
   assert.match(html, /translateEnabled: nextTranslateEnabled/);
+});
+
+test('admin page accepts a display title and renders an in-progress refresh status', async () => {
+  const requests = [];
+  const html = renderAdminPage({
+    feeds: [
+      {
+        name: 'Economist',
+        title: 'The Economist',
+        sourceUrl: 'https://www.economist.com/latest/rss.xml',
+        folder: '',
+        feedUrl: 'http://localhost:8787/feeds/Economist.xml',
+        translateEnabled: true,
+        lastRefreshStatus: 'refreshing',
+        lastRefreshedAt: '2026-07-20T00:00:00.000Z',
+        entryCount: 3,
+        errorCount: 0,
+        recentEntryErrors: [],
+        isManaged: false,
+        items: [],
+      },
+    ],
+    baseUrl: 'http://localhost:8787',
+    readLaterFeedName: 'read-later',
+  });
+  const dom = new JSDOM(html, {
+    runScripts: 'dangerously',
+    url: 'http://localhost:8787/admin',
+    beforeParse(window) {
+      window.fetch = async (url, options = {}) => {
+        requests.push({ url, options });
+        return {
+          ok: true,
+          json: async () => options.method === 'POST' ? { ok: true } : { ok: true, feeds: [] },
+        };
+      };
+    },
+  });
+
+  assert.ok(dom.window.document.querySelector('input[name="title"]'));
+  assert.equal(dom.window.document.querySelector('.feed-item .pill').textContent, '刷新中');
+
+  const form = dom.window.document.getElementById('feed-form');
+  form.elements.name.value = 'Economist';
+  form.elements.sourceUrl.value = 'https://www.economist.com/latest/rss.xml';
+  form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const request = requests.find(({ options }) => options.method === 'POST');
+  assert.ok(request);
+  assert.equal(Object.hasOwn(JSON.parse(request.options.body), 'title'), false);
 });

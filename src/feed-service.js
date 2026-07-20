@@ -88,6 +88,7 @@ class FeedService {
   ensureFeed(feedName, sourceUrl, sourceTitle, folder = null, translateEnabled = null) {
     const now = isoNow();
     const existing = this.db.getFeedByName(feedName);
+    const normalizedSourceTitle = String(sourceTitle || '').trim();
     const effectiveTranslateEnabled =
       typeof translateEnabled === 'boolean' ? translateEnabled : Boolean(existing?.translate_enabled);
 
@@ -95,7 +96,7 @@ class FeedService {
       name: feedName,
       sourceUrl,
       folder: normalizeFolderPath(folder == null ? existing?.folder || '' : folder || existing?.folder || ''),
-      title: sourceTitle || existing?.title || feedName,
+      title: existing?.title || normalizedSourceTitle || feedName,
       translateEnabled: effectiveTranslateEnabled,
       lastRefreshedAt: existing?.last_refreshed_at || null,
       createdAt: existing?.created_at || now,
@@ -131,11 +132,13 @@ class FeedService {
     }));
   }
 
-  saveFeed({ name, sourceUrl, folder = '', translateEnabled }) {
+  saveFeed({ name, sourceUrl, folder = '', title, translateEnabled }) {
     const now = isoNow();
     const existing = this.db.getFeedByName(name) || this.db.getFeedBySourceUrl(sourceUrl);
     const effectiveName = existing?.name || name;
     const normalizedFolder = normalizeFolderPath(folder);
+    const normalizedTitle = typeof title === 'string' ? title.trim() : '';
+    const effectiveTitle = normalizedTitle || existing?.title || effectiveName;
     const effectiveTranslateEnabled =
       typeof translateEnabled === 'boolean' ? translateEnabled : Boolean(existing?.translate_enabled);
 
@@ -143,7 +146,7 @@ class FeedService {
       name: effectiveName,
       sourceUrl,
       folder: normalizedFolder,
-      title: existing?.title || null,
+      title: effectiveTitle,
       translateEnabled: effectiveTranslateEnabled,
       lastRefreshedAt: existing?.last_refreshed_at || null,
       lastRefreshStatus: existing?.last_refresh_status || null,
@@ -219,22 +222,26 @@ class FeedService {
   }
 
   async refreshFeed({ parser, feedName, sourceUrl }) {
-    this.ensureFeed(feedName, sourceUrl, null);
-    const storedFeed = this.db.getFeedByName(feedName);
-    const translateEnabled = Boolean(storedFeed?.translate_enabled);
+    const refreshedAt = isoNow();
 
-    let parsedFeed;
     try {
-      parsedFeed = await this.parseSourceFeed(parser, sourceUrl);
+      return await this.runFeedRefresh({ parser, feedName, sourceUrl, refreshedAt });
     } catch (error) {
-      const refreshedAt = isoNow();
       this.db.setFeedRefreshResult(feedName, refreshedAt, 'error', error.message);
       throw error;
     }
+  }
 
-    this.ensureFeed(feedName, sourceUrl, parsedFeed.title || feedName);
+  async runFeedRefresh({ parser, feedName, sourceUrl, refreshedAt }) {
+    this.ensureFeed(feedName, sourceUrl, null);
+    const storedFeed = this.db.getFeedByName(feedName);
+    const translateEnabled = Boolean(storedFeed?.translate_enabled);
+    this.db.setFeedRefreshResult(feedName, refreshedAt, 'refreshing', '');
 
-    const refreshedAt = isoNow();
+    const parsedFeed = await this.parseSourceFeed(parser, sourceUrl);
+    const sourceTitle = String(parsedFeed.title || '').trim() || feedName;
+    this.ensureFeed(feedName, sourceUrl, sourceTitle);
+
     const items = parsedFeed.items.slice(0, this.config.maxItemsPerRefresh);
     const results = [];
 
@@ -357,7 +364,7 @@ class FeedService {
     return {
       feedName,
       sourceUrl,
-      sourceTitle: parsedFeed.title || feedName,
+      sourceTitle,
       translateEnabled,
       refreshedAt,
       status: feedStatus,

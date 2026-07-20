@@ -36,7 +36,7 @@ NewRSS 是一个面向 `Reeder` 等 RSS 阅读器的自托管 Reader View 工具
 - OPML 导入：`POST /api/opml/import`
 - OPML 导出：`GET /opml.xml`
 
-新增或更新源时，可以额外传 `translateEnabled: true`。开启后，后续刷新该 RSS 源时会自动把英文正文翻译成中文；没有配置翻译 provider 时会保留原文。
+新增或更新源时，可以额外传 `title` 作为管理页、OPML 和输出 Feed 使用的显示标题；新源留空时默认使用 `name`，更新现有源时留空会保留当前标题，后续刷新也不会用上游 RSS 标题覆盖它。也可以传 `translateEnabled: true`，让后续刷新自动把英文正文翻译成中文；没有配置翻译 provider 时会保留原文。
 
 ## 快速开始
 
@@ -302,7 +302,7 @@ The default mode is “extract original content, no server-side translation”:
 - Import OPML: `POST /api/opml/import`
 - Export OPML: `GET /opml.xml`
 
-When creating or updating a feed, you can additionally send `translateEnabled: true`. Once enabled, future refreshes will automatically translate English article content into Chinese; if no translation provider is configured, the original content is kept.
+When creating or updating a feed, you can additionally send `title` as the display title used by the admin page, OPML, and the generated feed. A new feed defaults to `name` when the title is blank; an existing feed keeps its current title when the value is blank, and refreshes do not overwrite it with the upstream RSS title. You can also send `translateEnabled: true` to automatically translate English article content on future refreshes; if no translation provider is configured, the original content is kept.
 
 ## Quick Start
 

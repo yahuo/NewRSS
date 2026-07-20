@@ -350,6 +350,10 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
               <input name="name" placeholder="例如 wired" />
             </label>
             <label>
+              显示标题
+              <input name="title" placeholder="可选，留空则使用名称" />
+            </label>
+            <label>
               RSS 地址
               <input name="sourceUrl" placeholder="https://example.com/feed.xml" required />
             </label>
@@ -362,7 +366,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
               <span>自动翻译英文内容</span>
             </label>
             <button class="primary" type="submit">保存源</button>
-            <div class="hint">名称为空时，会根据 URL 自动生成一个 slug。同名保存会更新地址、目录和翻译设置。</div>
+            <div class="hint">名称为空时，会根据 URL 自动生成一个 slug；显示标题只用于管理页、OPML 和输出 Feed。更新现有源时，显示标题留空会保留当前值。</div>
             <div class="hint">勾选后，后续刷新这个 RSS 源时会自动把英文正文翻译成中文；需要配置 Gemini API key 或 Codex OAuth。</div>
             <div class="status" id="status"></div>
           </form>
@@ -455,12 +459,14 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const formData = new FormData(form);
+        const title = String(formData.get('title') || '').trim();
         const payload = {
           name: String(formData.get('name') || '').trim(),
           sourceUrl: String(formData.get('sourceUrl') || '').trim(),
           folder: String(formData.get('folder') || '').trim(),
           translateEnabled: formData.get('translateEnabled') === 'true',
         };
+        if (title) payload.title = title;
 
         try {
           setStatus('正在保存…');
@@ -584,16 +590,18 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
                   \${items.map((feed) => {
                     const statusClass = feed.lastRefreshStatus === 'error'
                       ? 'pill danger'
-                      : feed.lastRefreshStatus === 'partial'
+                      : feed.lastRefreshStatus === 'partial' || feed.lastRefreshStatus === 'refreshing'
                         ? 'pill warn'
                         : 'pill';
                     const statusText = feed.lastRefreshStatus === 'error'
                       ? '源失败'
-                      : feed.lastRefreshStatus === 'partial'
-                        ? '部分失败'
-                        : feed.lastRefreshStatus === 'ok'
-                          ? '正常'
-                          : '未刷新';
+                      : feed.lastRefreshStatus === 'refreshing'
+                        ? '刷新中'
+                        : feed.lastRefreshStatus === 'partial'
+                          ? '部分失败'
+                          : feed.lastRefreshStatus === 'ok'
+                            ? '正常'
+                            : '未刷新';
                     return \`<article class="feed-item">
                       <header>
                         <strong>\${escapeHtml(feed.title)}</strong>
