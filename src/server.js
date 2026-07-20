@@ -485,6 +485,9 @@ function normalizeFeedPayload(body) {
   const folder = normalizeFolderPath(body.folder || '');
   const explicitName = String(body.name || '').trim();
   const name = explicitName || buildFeedNameFromUrl(parsedUrl);
+  const title = Object.prototype.hasOwnProperty.call(body, 'title')
+    ? String(body.title || '').trim()
+    : undefined;
 
   if (!name) {
     throw new Error('name is required');
@@ -494,6 +497,7 @@ function normalizeFeedPayload(body) {
     name,
     sourceUrl: parsedUrl.toString(),
     folder,
+    title,
     translateEnabled: readOptionalFeedTranslate(body),
   };
 }
