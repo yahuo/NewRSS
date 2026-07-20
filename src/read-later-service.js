@@ -21,7 +21,7 @@ class ReadLaterService {
     this.db = db;
     this.config = config;
     this.feedService = feedService;
-    this.translationService = new TranslationService(config);
+    this.translationService = new TranslationService(buildReadLaterTranslationConfig(config));
   }
 
   async saveUrl({ request, url, title = '', mode = 'auto', translate = true }) {
@@ -336,6 +336,18 @@ class ReadLaterService {
 }
 
 module.exports = ReadLaterService;
+
+function buildReadLaterTranslationConfig(config) {
+  const provider = String(config.readLaterTranslationProvider || '').trim();
+  if (!provider) {
+    return config;
+  }
+
+  return {
+    ...config,
+    translationProvider: provider,
+  };
+}
 
 function cleanupStructuredContent(html) {
   return String(html || '')

@@ -32,6 +32,14 @@ const config = {
   articleCookieFile: process.env.ARTICLE_COOKIE_FILE || '',
   articleCookieDomain: process.env.ARTICLE_COOKIE_DOMAIN || '',
   articleCookieHeader: process.env.ARTICLE_COOKIE_HEADER || '',
+  articleCookieRefreshEnabled: process.env.ARTICLE_COOKIE_REFRESH_ENABLED === 'true',
+  articleCookieRefreshDomains: (process.env.ARTICLE_COOKIE_REFRESH_DOMAINS || '')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean),
+  browserProfile: process.env.BROWSER_PROFILE || 'openclaw',
+  browserCommand: process.env.BROWSER_COMMAND || 'openclaw',
+  browserTimeoutMs: toInteger(process.env.BROWSER_TIMEOUT_MS, 30000),
   xCookieFile: process.env.X_COOKIE_FILE || '',
   xAuthToken: process.env.X_AUTH_TOKEN || '',
   xCt0: process.env.X_CT0 || '',
@@ -41,6 +49,7 @@ const config = {
   xBearerToken: process.env.X_BEARER_TOKEN || '',
   xClientTransactionId: process.env.X_CLIENT_TRANSACTION_ID || '',
   translationProvider: process.env.TRANSLATION_PROVIDER || 'gemini',
+  readLaterTranslationProvider: process.env.READ_LATER_TRANSLATION_PROVIDER || '',
   geminiApiKey: process.env.GEMINI_API_KEY || '',
   geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
   geminiTimeoutMs: toInteger(process.env.GEMINI_TIMEOUT_MS, 90000),

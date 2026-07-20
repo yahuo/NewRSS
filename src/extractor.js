@@ -1,11 +1,17 @@
 const { JSDOM, VirtualConsole } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
-const { resolveArticleCookieHeader } = require('./article-cookies');
+const {
+  resolveArticleCookieHeader,
+  refreshArticleCookiesFromBrowser,
+  shouldRefreshArticleCookies,
+} = require('./article-cookies');
 const { getArticleStrategy } = require('./article-strategies');
 const { withProxy } = require('./http-client');
 const { stripHtml } = require('./utils');
 
 const MIN_CONTENT_TEXT_LENGTH = 280;
+const MIN_EMBEDDED_BLOCK_COUNT = 2;
+const MIN_STANDALONE_EMBEDDED_TEXT_LENGTH = 800;
 const ARTICLE_ACCEPT_HEADER =
   'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7';
 const ARTICLE_ACCEPT_LANGUAGE_HEADER = 'en-US,en;q=0.9';
@@ -33,12 +39,43 @@ const looksLikeTruncatedContent = (html, text) => {
   return /(?:\u2026|\.{3})\s*$/.test(normalizedText);
 };
 
+const countMeaningfulBlocks = (html) => {
+  if (!html) {
+    return 0;
+  }
+
+  const dom = new JSDOM(`<body>${html}</body>`);
+  const { document } = dom.window;
+  const blocks = document.querySelectorAll('p, li, blockquote, pre, h1, h2, h3, h4, h5, h6');
+
+  let count = 0;
+  for (const block of blocks) {
+    if (stripHtml(block.innerHTML || '').trim().length > 0) {
+      count += 1;
+    }
+  }
+
+  return count;
+};
+
+const looksLikeStandaloneEmbeddedArticle = (html, textLength) => {
+  if (textLength >= MIN_STANDALONE_EMBEDDED_TEXT_LENGTH) {
+    return true;
+  }
+
+  return countMeaningfulBlocks(html) >= MIN_EMBEDDED_BLOCK_COUNT;
+};
+
 const extractEmbeddedContent = (item) => {
   const embedded = item['content:encoded'] || item.content || item.contentSnippet || '';
   const text = stripHtml(embedded);
   const textLength = text.length;
 
-  if (textLength >= MIN_CONTENT_TEXT_LENGTH && !looksLikeTruncatedContent(embedded, text)) {
+  if (
+    textLength >= MIN_CONTENT_TEXT_LENGTH &&
+    !looksLikeTruncatedContent(embedded, text) &&
+    looksLikeStandaloneEmbeddedArticle(embedded, textLength)
+  ) {
     return {
       html: embedded,
       textLength,
@@ -239,34 +276,50 @@ const looksLikeFailureShell = (html) => {
 };
 
 const fetchHtml = async (url, options, strategy) => {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
-  const cookieHeader = resolveArticleCookieHeader(url, options);
-  const headers = {
-    'user-agent': strategy?.userAgent || options.userAgent,
-    accept: ARTICLE_ACCEPT_HEADER,
-    'accept-language': ARTICLE_ACCEPT_LANGUAGE_HEADER,
-  };
+  const doFetch = async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+    const cookieHeader = resolveArticleCookieHeader(url, options);
+    const headers = {
+      'user-agent': strategy?.userAgent || options.userAgent,
+      accept: ARTICLE_ACCEPT_HEADER,
+      'accept-language': ARTICLE_ACCEPT_LANGUAGE_HEADER,
+    };
 
-  if (cookieHeader) {
-    headers.cookie = cookieHeader;
-  }
-
-  try {
-    const response = await fetch(url, {
-      headers,
-      redirect: 'follow',
-      signal: controller.signal,
-      ...withProxy(options.upstreamProxyUrl),
-    });
-
-    if (!response.ok) {
-      throw new Error(`fetch failed with status ${response.status}`);
+    if (cookieHeader) {
+      headers.cookie = cookieHeader;
     }
 
-    return await response.text();
-  } finally {
-    clearTimeout(timeout);
+    try {
+      const response = await fetch(url, {
+        headers,
+        redirect: 'follow',
+        signal: controller.signal,
+        ...withProxy(options.upstreamProxyUrl),
+      });
+
+      if (!response.ok) {
+        const error = new Error(`fetch failed with status ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+
+      return await response.text();
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  try {
+    return await doFetch();
+  } catch (error) {
+    if (error?.status === 403 && shouldRefreshArticleCookies(url, options)) {
+      const refreshResult = refreshArticleCookiesFromBrowser(url, options);
+      if (refreshResult?.refreshed) {
+        return await doFetch();
+      }
+    }
+    throw error;
   }
 };
 
@@ -328,5 +381,7 @@ const resolveArticleContent = async (item, options) => {
 };
 
 module.exports = {
+  extractEmbeddedContent,
+  looksLikeStandaloneEmbeddedArticle,
   resolveArticleContent,
 };

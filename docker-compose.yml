@@ -21,9 +21,20 @@ services:
       REFRESH_ON_BOOT: "${REFRESH_ON_BOOT:-true}"
       HTTP_TIMEOUT_MS: "${HTTP_TIMEOUT_MS:-15000}"
       UPSTREAM_PROXY_URL: "${UPSTREAM_PROXY_URL:-}"
+      TRANSLATION_PROVIDER: "${TRANSLATION_PROVIDER:-gemini}"
+      READ_LATER_TRANSLATION_PROVIDER: "${READ_LATER_TRANSLATION_PROVIDER:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-2.5-flash}"
+      GEMINI_TIMEOUT_MS: "${GEMINI_TIMEOUT_MS:-90000}"
+      CODEX_AUTH_FILE: "${CODEX_AUTH_FILE:-}"
+      CODEX_MODEL: "${CODEX_MODEL:-openai-codex/gpt-5.4}"
+      CODEX_BASE_URL: "${CODEX_BASE_URL:-}"
+      CODEX_TIMEOUT_MS: "${CODEX_TIMEOUT_MS:-90000}"
+      TRANSLATE_TARGET_LANGUAGE: "${TRANSLATE_TARGET_LANGUAGE:-Simplified Chinese}"
     volumes:
       - ./data:/app/data
       - ./cookies:/app/secrets:ro
+      - ${HOME}/.codex/auth.json:/app/codex-auth/auth.json:ro
     healthcheck:
       test: ["CMD", "node", "scripts/healthcheck.js"]
       interval: 30s

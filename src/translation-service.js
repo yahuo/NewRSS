@@ -11,6 +11,8 @@ const MAX_TRANSLATABLE_CHARS = 120_000;
 const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120;
+const CODEX_CHUNK_MAX_WORDS = 700;
+const CODEX_CHUNK_CONCURRENCY = 1;
 
 class TranslationService {
   constructor(config) {
@@ -58,7 +60,7 @@ class TranslationService {
     }
 
     const htmlPlan = buildHtmlTranslationPlan(html, {
-      maxWords: this.config.geminiChunkMaxWords,
+      maxWords: getTranslationChunkMaxWords(this.config),
     });
     const shouldUseChunkedHtml = html.length > MAX_TRANSLATABLE_CHARS || htmlPlan.chunks.length > 1;
 
@@ -117,7 +119,7 @@ class TranslationService {
     }
 
     const chunks = chunkMarkdown(rawMarkdown, {
-      maxWords: this.config.geminiChunkMaxWords,
+      maxWords: getTranslationChunkMaxWords(this.config),
     });
     if (!chunks.length) {
       return null;
@@ -125,7 +127,7 @@ class TranslationService {
 
     const translatedChunks = await mapWithConcurrency(
       chunks,
-      Math.max(1, Number(this.config.geminiChunkConcurrency) || 3),
+      getTranslationChunkConcurrency(this.config),
       (chunk, index) =>
         this.translateMarkdownChunk({
           sourceTitle,
@@ -199,7 +201,7 @@ class TranslationService {
 
     const translatedChunks = await mapWithConcurrency(
       htmlPlan.chunks,
-      Math.max(1, Number(this.config.geminiChunkConcurrency) || 3),
+      getTranslationChunkConcurrency(this.config),
       (chunkHtml, index) =>
         this.translateHtmlChunk({
           sourceTitle,
@@ -254,6 +256,24 @@ function getTranslationModel(config) {
   return getTranslationProvider(config) === 'codex-oauth'
     ? String(config.codexModel || 'openai-codex/gpt-5.5').trim()
     : String(config.geminiModel || 'gemini-2.5-flash').trim();
+}
+
+function getTranslationChunkMaxWords(config) {
+  const configured = Math.max(1, Number(config.geminiChunkMaxWords) || 1200);
+  if (getTranslationProvider(config) === 'codex-oauth') {
+    return Math.min(configured, CODEX_CHUNK_MAX_WORDS);
+  }
+
+  return configured;
+}
+
+function getTranslationChunkConcurrency(config) {
+  const configured = Math.max(1, Number(config.geminiChunkConcurrency) || 3);
+  if (getTranslationProvider(config) === 'codex-oauth') {
+    return Math.min(configured, CODEX_CHUNK_CONCURRENCY);
+  }
+
+  return configured;
 }
 
 async function callTranslationJson({ config, prompt }) {

@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 let cachedSignature = '';
 let cachedRules = [];
@@ -194,6 +195,127 @@ function dedupeRules(rules) {
   return Array.from(deduped.values());
 }
 
+function getRefreshableDomains(config = {}) {
+  const configured = (config.articleCookieRefreshDomains || []).filter(Boolean);
+  if (configured.length) {
+    return configured;
+  }
+
+  if (!config.articleCookieFile) {
+    return [];
+  }
+
+  try {
+    const resolvedPath = path.resolve(process.cwd(), config.articleCookieFile);
+    if (!fs.existsSync(resolvedPath)) {
+      return [];
+    }
+    const parsed = JSON.parse(fs.readFileSync(resolvedPath, 'utf8')) || {};
+    const domains = parsed?.domains;
+    if (!domains || typeof domains !== 'object') {
+      return [];
+    }
+    return Object.keys(domains).map((domain) => normalizeDomain(domain)).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function shouldRefreshArticleCookies(targetUrl, config = {}) {
+  if (!config.articleCookieRefreshEnabled || !config.articleCookieFile) {
+    return false;
+  }
+
+  try {
+    const hostname = new URL(targetUrl).hostname.toLowerCase();
+    const domains = getRefreshableDomains(config);
+    return domains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
+  } catch {
+    return false;
+  }
+}
+
+function refreshArticleCookiesFromBrowser(targetUrl, config = {}) {
+  if (!shouldRefreshArticleCookies(targetUrl, config)) {
+    return { refreshed: false, reason: 'disabled_or_domain_miss' };
+  }
+
+  const browserCommand = config.browserCommand || 'openclaw';
+  const browserProfile = config.browserProfile || 'openclaw';
+  const timeoutMs = Number.isFinite(config.browserTimeoutMs) ? config.browserTimeoutMs : 30000;
+
+  const openResult = spawnSync(
+    browserCommand,
+    ['browser', '--browser-profile', browserProfile, 'open', targetUrl],
+    { encoding: 'utf8', timeout: timeoutMs }
+  );
+  if (openResult.status !== 0) {
+    throw new Error(`browser open failed: ${openResult.stderr || openResult.stdout || 'unknown error'}`.trim());
+  }
+
+  const idMatch = `${openResult.stdout || ''}`.match(/id:\s*([A-Z0-9]+)/i);
+  const targetId = idMatch?.[1];
+  if (!targetId) {
+    throw new Error('browser open did not return a target id');
+  }
+
+  const cookieResult = spawnSync(
+    browserCommand,
+    ['browser', '--browser-profile', browserProfile, 'cookies', '--target-id', targetId],
+    { encoding: 'utf8', timeout: timeoutMs }
+  );
+  if (cookieResult.status !== 0) {
+    throw new Error(`browser cookies failed: ${cookieResult.stderr || cookieResult.stdout || 'unknown error'}`.trim());
+  }
+
+  let cookies;
+  try {
+    cookies = JSON.parse(cookieResult.stdout || '[]');
+  } catch (error) {
+    throw new Error(`browser cookies returned non-JSON output: ${error.message}`);
+  }
+
+  const hostname = new URL(targetUrl).hostname.toLowerCase();
+  const cookieMap = {};
+  for (const cookie of cookies) {
+    const domain = normalizeDomain(cookie?.domain);
+    const name = String(cookie?.name || '').trim();
+    if (!domain || !name) {
+      continue;
+    }
+    if (!(hostname === domain || hostname.endsWith(`.${domain}`) || domain.endsWith(hostname))) {
+      continue;
+    }
+    cookieMap[name] = String(cookie.value ?? '');
+  }
+
+  if (!Object.keys(cookieMap).length) {
+    throw new Error(`browser did not return any cookies for ${hostname}`);
+  }
+
+  const resolvedPath = path.resolve(process.cwd(), config.articleCookieFile);
+  let existing = {};
+  if (fs.existsSync(resolvedPath)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(resolvedPath, 'utf8')) || {};
+    } catch {
+      existing = {};
+    }
+  }
+
+  if (!existing.domains || typeof existing.domains !== 'object') {
+    existing.domains = {};
+  }
+  existing.domains[hostname] = cookieMap;
+  fs.writeFileSync(resolvedPath, `${JSON.stringify(existing, null, 2)}\n`, 'utf8');
+  cachedSignature = '';
+  cachedRules = [];
+
+  return { refreshed: true, targetId, cookieCount: Object.keys(cookieMap).length, hostname };
+}
+
 module.exports = {
   resolveArticleCookieHeader,
+  refreshArticleCookiesFromBrowser,
+  shouldRefreshArticleCookies,
 };

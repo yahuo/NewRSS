@@ -8,7 +8,7 @@ class Database {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.db.exec(`
-      PRAGMA journal_mode = WAL;
+      PRAGMA journal_mode = DELETE;
       PRAGMA foreign_keys = ON;
 
       CREATE TABLE IF NOT EXISTS feeds (
