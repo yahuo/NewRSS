@@ -41,6 +41,7 @@ const config = {
   xBearerToken: process.env.X_BEARER_TOKEN || '',
   xClientTransactionId: process.env.X_CLIENT_TRANSACTION_ID || '',
   translationProvider: process.env.TRANSLATION_PROVIDER || 'gemini',
+  readLaterTranslationProvider: process.env.READ_LATER_TRANSLATION_PROVIDER || '',
   geminiApiKey: process.env.GEMINI_API_KEY || '',
   geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
   geminiTimeoutMs: toInteger(process.env.GEMINI_TIMEOUT_MS, 90000),

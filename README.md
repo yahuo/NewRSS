@@ -223,12 +223,14 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
   可选，覆盖内置的 X 请求 Bearer Token
 - `TRANSLATION_PROVIDER`
   可选，翻译 provider，默认 `gemini`；可设为 `codex-oauth` 复用 Codex CLI 的 OAuth 登录态
+- `READ_LATER_TRANSLATION_PROVIDER`
+  可选，单独指定稍后读翻译 provider；留空时继承 `TRANSLATION_PROVIDER`
 - `GEMINI_API_KEY`
   可选，设置后会自动把英文的 read-later 内容以及开启 `translateEnabled` 的 RSS 源内容翻译为中文
 - `GEMINI_MODEL`
   可选，Gemini 模型名，默认 `gemini-2.5-flash`
 - `CODEX_AUTH_FILE`
-  可选，`TRANSLATION_PROVIDER=codex-oauth` 时读取的 Codex auth 文件，默认 `~/.codex/auth.json`
+  可选，使用 `codex-oauth` 时读取的 Codex auth 文件，默认 `~/.codex/auth.json`
 - `CODEX_MODEL`
   可选，Codex OAuth 模型名，默认 `openai-codex/gpt-5.5`
 - `TRANSLATE_TARGET_LANGUAGE`
@@ -473,12 +475,14 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
   Optional override for the built-in X request bearer token
 - `TRANSLATION_PROVIDER`
   Optional translation provider, default `gemini`; set to `codex-oauth` to reuse Codex CLI OAuth credentials
+- `READ_LATER_TRANSLATION_PROVIDER`
+  Optional provider override for read-later translation; inherits `TRANSLATION_PROVIDER` when empty
 - `GEMINI_API_KEY`
   Optional. When set, English read-later articles and feeds with `translateEnabled=true` are automatically translated
 - `GEMINI_MODEL`
   Optional Gemini model name, default `gemini-2.5-flash`
 - `CODEX_AUTH_FILE`
-  Optional Codex auth file for `TRANSLATION_PROVIDER=codex-oauth`, default `~/.codex/auth.json`
+  Optional Codex auth file when using `codex-oauth`, default `~/.codex/auth.json`
 - `CODEX_MODEL`
   Optional Codex OAuth model name, default `openai-codex/gpt-5.5`
 - `TRANSLATE_TARGET_LANGUAGE`
