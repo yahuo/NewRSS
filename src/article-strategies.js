@@ -5,6 +5,17 @@ const NYTIMES_USER_AGENT = 'Mozilla/5.0 (compatible; Google-InspectionTool/1.0)'
 const matchesDomain = (hostname, domain) =>
   hostname === domain || hostname.endsWith(`.${domain}`);
 
+const isNewYorkTimesLiveUrl = (url) => {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return false;
+  }
+
+  return matchesDomain(parsedUrl.hostname.toLowerCase(), 'nytimes.com') && parsedUrl.pathname.startsWith('/live/');
+};
+
 const mergeNewYorkerBody = (document) => {
   const containers = Array.from(document.querySelectorAll('.body__inner-container'));
   if (containers.length < 2) {
@@ -99,4 +110,5 @@ module.exports = {
   ECONOMIST_USER_AGENT,
   NYTIMES_USER_AGENT,
   getArticleStrategy,
+  isNewYorkTimesLiveUrl,
 };

@@ -1,4 +1,5 @@
 const RSS = require('rss');
+const { isNewYorkTimesLiveUrl } = require('./article-strategies');
 const { resolveArticleContent } = require('./extractor');
 const { withProxy } = require('./http-client');
 const TranslationService = require('./translation-service');
@@ -242,7 +243,9 @@ class FeedService {
     const sourceTitle = String(parsedFeed.title || '').trim() || feedName;
     this.ensureFeed(feedName, sourceUrl, sourceTitle);
 
-    const items = parsedFeed.items.slice(0, this.config.maxItemsPerRefresh);
+    const items = parsedFeed.items
+      .filter((item) => !isNewYorkTimesLiveUrl(item.link))
+      .slice(0, this.config.maxItemsPerRefresh);
     const results = [];
 
     for (const item of items) {
