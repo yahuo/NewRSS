@@ -1,5 +1,6 @@
 const ECONOMIST_USER_AGENT =
   'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.103 Mobile Safari/537.36 Liskov';
+const NYTIMES_USER_AGENT = 'Mozilla/5.0 (compatible; Google-InspectionTool/1.0)';
 
 const matchesDomain = (hostname, domain) =>
   hostname === domain || hostname.endsWith(`.${domain}`);
@@ -29,6 +30,32 @@ const exposeForeignPolicyBody = (document) => {
   document.querySelector('div.content-gated')?.classList.remove('content-gated');
 };
 
+const removeNewYorkTimesAds = (document) => {
+  const ads = document.querySelectorAll(
+    'div#top-wrapper, div#bottom-wrapper, div#dock-container, div[data-testid^="Dropzone-"]'
+  );
+  ads.forEach((element) => element.remove());
+
+  document.querySelectorAll('div[class]').forEach((element) => {
+    const isAdContainer = Array.from(element.classList).some(
+      (className) =>
+        className === 'ad-wrapper' || className.endsWith('-ad-wrapper') || className.startsWith('adunit_')
+    );
+    if (isAdContainer) {
+      element.remove();
+    }
+  });
+
+  document.querySelectorAll('div[data-testid="StandardAd"]').forEach((element) => {
+    const container = element.parentElement;
+    if (container?.matches('div[class^="css-"]')) {
+      container.remove();
+    } else {
+      element.remove();
+    }
+  });
+};
+
 const ARTICLE_STRATEGIES = [
   {
     name: 'economist',
@@ -48,6 +75,13 @@ const ARTICLE_STRATEGIES = [
     preferPage: true,
     prepareDocument: exposeForeignPolicyBody,
   },
+  {
+    name: 'new-york-times',
+    domain: 'nytimes.com',
+    preferPage: true,
+    userAgent: NYTIMES_USER_AGENT,
+    prepareDocument: removeNewYorkTimesAds,
+  },
 ];
 
 const getArticleStrategy = (url) => {
@@ -63,5 +97,6 @@ const getArticleStrategy = (url) => {
 
 module.exports = {
   ECONOMIST_USER_AGENT,
+  NYTIMES_USER_AGENT,
   getArticleStrategy,
 };

@@ -4,14 +4,16 @@ const { JSDOM } = require('jsdom');
 
 const {
   ECONOMIST_USER_AGENT,
+  NYTIMES_USER_AGENT,
   getArticleStrategy,
 } = require('../src/article-strategies');
 const { resolveArticleContent } = require('../src/extractor');
 
-test('article strategies only match the three supported domains', () => {
+test('article strategies only match the four supported domains', () => {
   assert.equal(getArticleStrategy('https://www.economist.com/test').name, 'economist');
   assert.equal(getArticleStrategy('https://www.newyorker.com/test').name, 'new-yorker');
   assert.equal(getArticleStrategy('https://foreignpolicy.com/test').name, 'foreign-policy');
+  assert.equal(getArticleStrategy('https://www.nytimes.com/test').name, 'new-york-times');
   assert.equal(getArticleStrategy('https://not-economist.com/test'), null);
   assert.equal(getArticleStrategy('https://example.com/test'), null);
 });
@@ -50,6 +52,29 @@ test('Foreign Policy strategy removes the preview and exposes the full body', ()
   assert.equal(dom.window.document.querySelector('.content-ungated'), null);
   assert.equal(dom.window.document.querySelector('.content-gated'), null);
   assert.equal(dom.window.document.querySelector('article').textContent.trim(), 'Complete article body');
+});
+
+test('New York Times strategy removes ad containers without deleting similarly named content wrappers', () => {
+  const dom = new JSDOM(`
+    <main>
+      <div id="top-wrapper">Top advertisement</div>
+      <div id="plain-ad" class="ad-wrapper extra-class">Advertisement</div>
+      <div id="named-ad" class="story-ad-wrapper extra-class">Advertisement</div>
+      <div id="ad-unit" class="content adunit_inline">Advertisement</div>
+      <div id="standard-ad" class="css-slot"><div data-testid="StandardAd">Advertisement</div></div>
+      <section id="fallback-ad"><div data-testid="StandardAd">Advertisement</div></section>
+      <div id="article-lead" class="lead-wrapper"><p>Article lead must remain</p></div>
+    </main>
+  `);
+  const strategy = getArticleStrategy('https://www.nytimes.com/2026/07/20/test.html');
+
+  strategy.prepareDocument(dom.window.document);
+
+  for (const id of ['top-wrapper', 'plain-ad', 'named-ad', 'ad-unit', 'standard-ad']) {
+    assert.equal(dom.window.document.getElementById(id), null);
+  }
+  assert.equal(dom.window.document.querySelector('#fallback-ad [data-testid="StandardAd"]'), null);
+  assert.equal(dom.window.document.querySelector('#article-lead').textContent.trim(), 'Article lead must remain');
 });
 
 test('New Yorker document preparation runs before Readability', async () => {
@@ -145,6 +170,48 @@ test('Economist strategy bypasses a long RSS teaser and uses its request user ag
     assert.equal(result.source, 'readability');
     assert.equal(requestHeaders['user-agent'], ECONOMIST_USER_AGENT);
     assert.match(result.html, /Second fetched paragraph/);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('New York Times strategy fetches the page with its request user agent and removes ads', async () => {
+  const originalFetch = global.fetch;
+  let requestHeaders;
+  global.fetch = async (_url, options) => {
+    requestHeaders = options.headers;
+    return new Response(`
+      <!doctype html>
+      <html>
+        <head><title>Fetched New York Times article</title></head>
+        <body>
+          <article>
+            <h1>Fetched New York Times article</h1>
+            <p>${'First fetched paragraph. '.repeat(30)}</p>
+            <div data-testid="Dropzone-inarticle">Advertisement that should be removed</div>
+            <p>${'Second fetched paragraph. '.repeat(30)}</p>
+          </article>
+        </body>
+      </html>
+    `, { status: 200 });
+  };
+
+  try {
+    const result = await resolveArticleContent(
+      {
+        link: 'https://www.nytimes.com/2026/07/20/test.html',
+        content: `<p>${'Long RSS summary. '.repeat(30)}</p>`,
+      },
+      {
+        timeoutMs: 5_000,
+        userAgent: 'NewRSS default user agent',
+      }
+    );
+
+    assert.equal(result.source, 'readability');
+    assert.equal(requestHeaders['user-agent'], NYTIMES_USER_AGENT);
+    assert.match(result.html, /Second fetched paragraph/);
+    assert.doesNotMatch(result.html, /Advertisement that should be removed/);
   } finally {
     global.fetch = originalFetch;
   }
