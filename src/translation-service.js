@@ -255,6 +255,10 @@ class TranslationService {
     };
   }
 
+  isCodexProvider() {
+    return getTranslationProvider(this.config) === CODEX_PROVIDER && Boolean(this.config.translationStore);
+  }
+
   async probeCodex({ force = false } = {}) {
     if (getTranslationProvider(this.config) !== CODEX_PROVIDER) {
       throw new Error('Codex OAuth is not the active translation provider');
@@ -266,16 +270,27 @@ class TranslationService {
     const now = new Date().toISOString();
     const claim = this.config.translationStore.claimTranslationProbe(CODEX_PROVIDER, now, force);
     if (!claim.claimed) {
-      return { probed: false, circuit: claim.circuit };
+      return {
+        probed: false,
+        ok: false,
+        error: 'Codex probe is already in progress or not due',
+        circuit: claim.circuit,
+      };
     }
 
     try {
-      await callCodexText({ config: this.config, prompt: 'Reply OK.', probe: true });
-      const circuit = this.config.translationStore.closeTranslationCircuit(CODEX_PROVIDER, new Date().toISOString());
-      return { probed: true, ok: true, circuit };
-    } catch (error) {
-      const circuit = openCodexCircuit(this.config, error);
-      return { probed: true, ok: false, error: error.message, circuit };
+      try {
+        await callCodexText({ config: this.config, prompt: 'Reply OK.', probe: true });
+        const circuit = this.config.translationStore.closeTranslationCircuit(CODEX_PROVIDER, new Date().toISOString());
+        return { probed: true, ok: true, circuit };
+      } catch (error) {
+        const circuit = isCodexUsageLimitError(error) || claim.circuit.state !== 'closed'
+          ? openCodexCircuit(this.config, error)
+          : this.config.translationStore.closeTranslationCircuit(CODEX_PROVIDER, new Date().toISOString());
+        return { probed: true, ok: false, error: error.message, circuit };
+      }
+    } finally {
+      this.config.translationStore.releaseTranslationProbe(CODEX_PROVIDER, new Date().toISOString());
     }
   }
 }
@@ -511,6 +526,7 @@ async function callCodexText({ config, prompt, probe = false }) {
     });
     if (!probe && isCodexUsageLimitError(error)) {
       const circuit = openCodexCircuit(config, error);
+      error.code = 'CODEX_USAGE_LIMIT';
       error.retryAfter = circuit.next_probe_at;
     }
     throw error;

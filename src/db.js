@@ -55,6 +55,7 @@ class Database {
         next_probe_at TEXT,
         last_probe_at TEXT,
         last_error TEXT,
+        probe_in_progress INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL
       );
 
@@ -70,10 +71,15 @@ class Database {
         error TEXT,
         created_at TEXT NOT NULL
       );
+
+      CREATE INDEX IF NOT EXISTS translation_usage_provider_id_idx
+      ON translation_usage(provider, id DESC);
     `);
 
     this.ensureFeedSchema();
     this.ensureEntrySchema();
+    this.ensureTranslationCircuitSchema();
+    this.recoverInterruptedTranslationProbes();
 
     this.setFeedRefreshResultStmt = this.db.prepare(`
       UPDATE feeds
@@ -273,6 +279,25 @@ class Database {
     }
   }
 
+  ensureTranslationCircuitSchema() {
+    const columns = this.db.prepare(`PRAGMA table_info(translation_circuits)`).all();
+    if (!columns.some((column) => column.name === 'probe_in_progress')) {
+      this.db.exec(`ALTER TABLE translation_circuits ADD COLUMN probe_in_progress INTEGER NOT NULL DEFAULT 0;`);
+    }
+  }
+
+  recoverInterruptedTranslationProbes() {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE translation_circuits
+      SET state = CASE WHEN state = 'half-open' THEN 'open' ELSE state END,
+          next_probe_at = CASE WHEN state = 'half-open' THEN ? ELSE next_probe_at END,
+          probe_in_progress = 0,
+          updated_at = ?
+      WHERE state = 'half-open' OR probe_in_progress = 1
+    `).run(now, now);
+  }
+
   normalizeStoredFolders() {
     const now = new Date().toISOString();
     const feeds = this.db.prepare(`SELECT name, folder FROM feeds`).all();
@@ -391,6 +416,7 @@ class Database {
       next_probe_at: null,
       last_probe_at: null,
       last_error: null,
+      probe_in_progress: 0,
       updated_at: null,
     };
   }
@@ -409,6 +435,7 @@ class Database {
         next_probe_at = excluded.next_probe_at,
         last_probe_at = excluded.last_probe_at,
         last_error = excluded.last_error,
+        probe_in_progress = 0,
         updated_at = excluded.updated_at
     `).run(provider, failureCount, now, nextProbeAt, current.last_probe_at, String(error || ''), now);
     return this.getTranslationCircuit(provider);
@@ -420,7 +447,7 @@ class Database {
       VALUES (?, 'closed', 0, ?)
       ON CONFLICT(provider) DO UPDATE SET
         state = 'closed', failure_count = 0, opened_at = NULL, next_probe_at = NULL,
-        last_error = NULL, updated_at = excluded.updated_at
+        last_error = NULL, probe_in_progress = 0, updated_at = excluded.updated_at
     `).run(provider, now);
     return this.getTranslationCircuit(provider);
   }
@@ -429,25 +456,36 @@ class Database {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const circuit = this.getTranslationCircuit(provider);
-      const halfOpenStale = circuit.state === 'half-open' && circuit.last_probe_at &&
-        new Date(now).getTime() - new Date(circuit.last_probe_at).getTime() >= 10 * 60_000;
-      const due = force || halfOpenStale || (circuit.state === 'open' && circuit.next_probe_at && circuit.next_probe_at <= now);
-      if ((circuit.state === 'half-open' && !halfOpenStale) || (!force && circuit.state === 'closed') || !due) {
+      const due = force || (circuit.state === 'open' && circuit.next_probe_at && circuit.next_probe_at <= now);
+      if (circuit.probe_in_progress || (!force && circuit.state === 'closed') || !due) {
         this.db.exec('COMMIT');
         return { claimed: false, circuit };
       }
 
+      const probeState = circuit.state === 'closed' ? 'closed' : 'half-open';
       this.db.prepare(`
-        INSERT INTO translation_circuits (provider, state, failure_count, last_probe_at, updated_at)
-        VALUES (?, 'half-open', 0, ?, ?)
-        ON CONFLICT(provider) DO UPDATE SET state = 'half-open', last_probe_at = excluded.last_probe_at, updated_at = excluded.updated_at
-      `).run(provider, now, now);
+        INSERT INTO translation_circuits (provider, state, failure_count, last_probe_at, probe_in_progress, updated_at)
+        VALUES (?, ?, 0, ?, 1, ?)
+        ON CONFLICT(provider) DO UPDATE SET
+          state = excluded.state,
+          last_probe_at = excluded.last_probe_at,
+          probe_in_progress = 1,
+          updated_at = excluded.updated_at
+      `).run(provider, probeState, now, now);
       this.db.exec('COMMIT');
-      return { claimed: true, circuit: this.getTranslationCircuit(provider) };
+      return { claimed: true, circuit };
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  releaseTranslationProbe(provider, now) {
+    this.db.prepare(`
+      UPDATE translation_circuits
+      SET probe_in_progress = 0, updated_at = ?
+      WHERE provider = ?
+    `).run(now, provider);
   }
 
   recordTranslationUsage({ provider, model, requestKind, status, usage, error, createdAt }) {

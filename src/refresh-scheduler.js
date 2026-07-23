@@ -16,8 +16,7 @@ function scheduleRefreshes({ feedService, parser, config, setIntervalFn = setInt
 
   const runCodexProbe = async () => {
     try {
-      const status = feedService.getCodexStatus();
-      if (status) {
+      if (feedService.isCodexProvider()) {
         await feedService.probeCodex({ force: false });
       }
     } catch (error) {

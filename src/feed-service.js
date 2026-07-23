@@ -292,9 +292,13 @@ class FeedService {
           !contentChanged &&
           Boolean(existingEntry?.translation_retry_after) &&
           existingEntry.translation_retry_after > refreshedAt;
+        const translationBackoffExpired =
+          Boolean(existingEntry?.translation_retry_after) &&
+          existingEntry.translation_retry_after <= refreshedAt;
         const reuseExistingTranslation =
           translateEnabled &&
           Boolean(existingEntry?.translated_content_html) &&
+          !translationBackoffExpired &&
           (existingEntry?.source_title || '') === sourceTitle &&
           (existingEntry?.extracted_content_html || '') === extractedContentHtml;
         const translation = reuseExistingTranslation || translationBackoffActive
@@ -374,7 +378,11 @@ class FeedService {
           updatedAt,
         });
 
-        if (error.translationFailure) {
+        if (
+          error.translationFailure &&
+          error.code !== 'CODEX_CIRCUIT_OPEN' &&
+          error.code !== 'CODEX_USAGE_LIMIT'
+        ) {
           const retryAfter = nextTranslationRetryAt(translationStateReset ? null : existingEntry, refreshedAt, error.retryAfter);
           this.db.recordEntryTranslationFailure(feedName, sourceGuid, error.message, refreshedAt, retryAfter);
         }
@@ -493,6 +501,10 @@ class FeedService {
 
   getCodexStatus() {
     return this.translationService.getCodexStatus();
+  }
+
+  isCodexProvider() {
+    return this.translationService.isCodexProvider();
   }
 
   probeCodex(options) {

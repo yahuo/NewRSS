@@ -286,3 +286,103 @@ test('translation backoff persists across service restart and content changes cl
   assert.equal(entry.translation_failure_count, 0);
   assert.equal(entry.translation_retry_after, null);
 });
+
+test('expired translation backoff retries instead of reusing an older translation', async (t) => {
+  const { db, directory, service } = createService();
+  const originalFetch = global.fetch;
+  let articleBody = 'Original English article body. '.repeat(50);
+  global.fetch = async () => new Response(`<article><p>${articleBody}</p></article>`, { status: 200 });
+  t.after(() => {
+    global.fetch = originalFetch;
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  service.saveFeed({
+    name: 'RetryFeed', sourceUrl: 'https://example.com/feed.xml', title: 'Retry', translateEnabled: true,
+  });
+  const item = { guid: 'retry-article', title: 'English retry title', link: 'https://example.com/retry' };
+  const sourceGuid = stableGuid(item);
+  service.parseSourceFeed = async () => ({ title: 'Retry', items: [item] });
+  service.translationService.shouldTranslate = () => true;
+  service.translationService.translateArticle = async () => ({
+    translatedTitle: '旧标题', translatedContentHtml: '<p>旧译文</p>', provider: 'test',
+  });
+  await service.refreshStoredFeed({ parser: {}, feedName: 'RetryFeed' });
+
+  articleBody = 'Changed English article body. '.repeat(50);
+  service.translationService.translateArticle = async () => { throw new Error('translation timeout'); };
+  await service.refreshStoredFeed({ parser: {}, feedName: 'RetryFeed' });
+  const duringResult = await service.refreshStoredFeed({ parser: {}, feedName: 'RetryFeed' });
+  const during = db.getEntryByFeedAndGuid('RetryFeed', sourceGuid);
+  assert.equal(duringResult.items[0].status, 'backoff');
+  assert.equal(during.translated_content_html, '<p>旧译文</p>');
+  assert.equal(during.translated_title, '旧标题');
+  db.db.prepare(`UPDATE entries SET translation_retry_after = ? WHERE feed_name = ? AND source_guid = ?`).run(
+    new Date(Date.now() - 1000).toISOString(), 'RetryFeed', sourceGuid
+  );
+
+  let retryCalls = 0;
+  service.translationService.translateArticle = async () => {
+    retryCalls += 1;
+    return { translatedTitle: '新标题', translatedContentHtml: '<p>新译文</p>', provider: 'test' };
+  };
+  await service.refreshStoredFeed({ parser: {}, feedName: 'RetryFeed' });
+  const entry = db.getEntryByFeedAndGuid('RetryFeed', sourceGuid);
+  assert.equal(retryCalls, 1);
+  assert.equal(entry.translated_content_html, '<p>新译文</p>');
+  assert.equal(entry.translation_failure_count, 0);
+});
+
+test('open Codex circuit does not create article-level translation backoff', async (t) => {
+  const { db, directory, service } = createService();
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response(`<article><p>${'English article body. '.repeat(50)}</p></article>`, { status: 200 });
+  t.after(() => {
+    global.fetch = originalFetch;
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  service.saveFeed({
+    name: 'CircuitFeed', sourceUrl: 'https://example.com/feed.xml', title: 'Circuit', translateEnabled: true,
+  });
+  const item = { guid: 'circuit-article', title: 'English circuit title', link: 'https://example.com/circuit' };
+  service.parseSourceFeed = async () => ({ title: 'Circuit', items: [item] });
+  service.translationService.shouldTranslate = () => true;
+  service.translationService.translateArticle = async () => {
+    const error = new Error('Codex circuit is open');
+    error.code = 'CODEX_CIRCUIT_OPEN';
+    throw error;
+  };
+
+  await service.refreshStoredFeed({ parser: {}, feedName: 'CircuitFeed' });
+  const entry = db.getEntryByFeedAndGuid('CircuitFeed', stableGuid(item));
+  assert.equal(entry.translation_failure_count, 0);
+  assert.equal(entry.translation_retry_after, null);
+});
+
+test('Codex usage-limit error does not create article-level translation backoff', async (t) => {
+  const { db, directory, service } = createService();
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response(`<article><p>${'English article body. '.repeat(50)}</p></article>`, { status: 200 });
+  t.after(() => {
+    global.fetch = originalFetch;
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  service.saveFeed({
+    name: 'LimitFeed', sourceUrl: 'https://example.com/feed.xml', title: 'Limit', translateEnabled: true,
+  });
+  const item = { guid: 'limit-article', title: 'English limit title', link: 'https://example.com/limit' };
+  service.parseSourceFeed = async () => ({ title: 'Limit', items: [item] });
+  service.translationService.shouldTranslate = () => true;
+  service.translationService.translateArticle = async () => {
+    const error = new Error('The usage limit has been reached');
+    error.code = 'CODEX_USAGE_LIMIT';
+    throw error;
+  };
+
+  await service.refreshStoredFeed({ parser: {}, feedName: 'LimitFeed' });
+  const entry = db.getEntryByFeedAndGuid('LimitFeed', stableGuid(item));
+  assert.equal(entry.translation_failure_count, 0);
+  assert.equal(entry.translation_retry_after, null);
+});

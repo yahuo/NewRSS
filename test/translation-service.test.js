@@ -191,10 +191,18 @@ test('codex usage-limit opens a persistent circuit and blocks later requests', a
   t.after(() => { global.fetch = previousFetch; });
 
   const service = new TranslationService(fixture.config, { db: fixture.db });
-  await assert.rejects(service.translateTitle({ title: 'First title', sourceUrl: '' }), /usage limit/);
+  let usageError;
+  await assert.rejects(
+    service.translateTitle({ title: 'First title', sourceUrl: '' }),
+    (error) => {
+      usageError = error;
+      return /usage limit/.test(error.message);
+    }
+  );
   await assert.rejects(service.translateTitle({ title: 'Second title', sourceUrl: '' }), /circuit is open/);
 
   assert.equal(fetchCount, 1);
+  assert.equal(usageError.code, 'CODEX_USAGE_LIMIT');
   const circuit = fixture.db.getTranslationCircuit('codex-oauth');
   assert.equal(circuit.state, 'open');
   assert.equal(circuit.failure_count, 1);
@@ -285,6 +293,68 @@ test('codex chunk translation is serial and stops after the first failed chunk',
     sourceUrl: 'https://example.com/chunked',
   }), /temporary failure/);
   assert.equal(fetchCount, 1);
+});
+
+test('manual probe from closed does not block translations and a transient failure restores closed', async (t) => {
+  const fixture = createCodexFixture(t);
+  let releaseFetch;
+  const previousFetch = global.fetch;
+  global.fetch = () => new Promise((resolve) => { releaseFetch = resolve; });
+  t.after(() => { global.fetch = previousFetch; });
+  const service = new TranslationService(fixture.config, { db: fixture.db });
+
+  const probe = service.probeCodex({ force: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixture.db.getTranslationCircuit('codex-oauth').state, 'closed');
+  releaseFetch(textResponse(JSON.stringify({ error: { message: 'temporary network failure' } }), 500));
+  const result = await probe;
+  assert.equal(result.ok, false);
+  assert.equal(fixture.db.getTranslationCircuit('codex-oauth').state, 'closed');
+});
+
+test('interrupted half-open probe is recoverable immediately after database restart', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'newrss-codex-restart-'));
+  const dbPath = path.join(directory, 'newrss.db');
+  let db = new Database(dbPath);
+  db.openTranslationCircuit('codex-oauth', 'usage limit', new Date().toISOString(), new Date(Date.now() - 1000).toISOString());
+  const claim = db.claimTranslationProbe('codex-oauth', new Date().toISOString());
+  assert.equal(claim.claimed, true);
+  assert.equal(db.getTranslationCircuit('codex-oauth').state, 'half-open');
+  db.db.close();
+
+  db = new Database(dbPath);
+  t.after(() => {
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const recovered = db.getTranslationCircuit('codex-oauth');
+  assert.equal(recovered.state, 'open');
+  assert.ok(recovered.next_probe_at <= new Date().toISOString());
+});
+
+test('concurrent manual probe reports that no probe was started', async (t) => {
+  const fixture = createCodexFixture(t);
+  fixture.db.openTranslationCircuit(
+    'codex-oauth', 'usage limit', new Date().toISOString(), new Date(Date.now() - 1000).toISOString()
+  );
+  const firstClaim = fixture.db.claimTranslationProbe('codex-oauth', new Date().toISOString(), true);
+  assert.equal(firstClaim.claimed, true);
+  const service = new TranslationService(fixture.config, { db: fixture.db });
+  const result = await service.probeCodex({ force: true });
+  assert.equal(result.probed, false);
+  assert.equal(result.ok, false);
+});
+
+test('probe claim is released when circuit state persistence fails', async (t) => {
+  const fixture = createCodexFixture(t);
+  const previousFetch = global.fetch;
+  global.fetch = async () => textResponse('event: response.output_text.done\ndata: {"type":"response.output_text.done","text":"OK"}\n\n');
+  t.after(() => { global.fetch = previousFetch; });
+  fixture.db.closeTranslationCircuit = () => { throw new Error('state write failed'); };
+  const service = new TranslationService(fixture.config, { db: fixture.db });
+
+  await assert.rejects(service.probeCodex({ force: true }), /state write failed/);
+  assert.equal(fixture.db.getTranslationCircuit('codex-oauth').probe_in_progress, 0);
 });
 
 function jsonResponse(payload, status = 200) {

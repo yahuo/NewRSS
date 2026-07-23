@@ -7,13 +7,21 @@ const { scheduleRefreshes } = require('../src/refresh-scheduler');
 test('scheduler uses the non-overlapping refresh entry point', async () => {
   const callbacks = [];
   let refreshCalls = 0;
+  let probeCalls = 0;
   const feedService = {
     async tryRefreshAllFeeds() {
       refreshCalls += 1;
       return { skipped: true, reason: 'refresh already running: feed:test' };
     },
+    isCodexProvider() {
+      return true;
+    },
     getCodexStatus() {
-      return null;
+      throw new Error('scheduler must not read the usage summary');
+    },
+    async probeCodex() {
+      probeCalls += 1;
+      return { probed: false, ok: false };
     },
   };
 
@@ -30,7 +38,11 @@ test('scheduler uses the non-overlapping refresh entry point', async () => {
   const refreshTimer = callbacks.find(({ delay }) => delay === 30 * 60 * 1000);
   assert.ok(refreshTimer);
   await refreshTimer.callback();
+  const probeTimer = callbacks.find(({ delay }) => delay === 60 * 1000);
+  assert.ok(probeTimer);
+  await probeTimer.callback();
   assert.equal(refreshCalls, 1);
+  assert.equal(probeCalls, 2);
 });
 
 test('MAX_ITEMS_PER_REFRESH defaults to 10', () => {
