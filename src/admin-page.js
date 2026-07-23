@@ -41,6 +41,17 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         font-size: clamp(2rem, 5vw, 3.4rem);
         line-height: 0.98;
       }
+      .brand-title {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .brand-logo {
+        width: clamp(2rem, 4vw, 2.8rem);
+        height: auto;
+        flex: none;
+        color: var(--accent);
+      }
       .hero p {
         margin: 0;
         color: var(--muted);
@@ -337,7 +348,15 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
   <body>
     <div class="shell">
       <section class="hero">
-        <h1>NewRSS Feed 管理</h1>
+        <h1 class="brand-title">
+          <svg class="brand-logo" viewBox="0 0 28 28" aria-hidden="true">
+            <rect x="1" y="1" width="26" height="26" rx="7" fill="#fffaf4" stroke="currentColor" stroke-width="1.5" />
+            <circle cx="9" cy="19" r="2.4" fill="currentColor" />
+            <path d="M9 13.5a5.5 5.5 0 0 1 5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+            <path d="M9 8a11 11 0 0 1 11 11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+          </svg>
+          <span>NewRSS Feed 管理</span>
+        </h1>
         <p>维护你的源列表，按目录组织输出，并导出 OPML 给 Reeder 等阅读器。每个源会生成一个 reader-view feed，文章链接会落到本服务托管的正文页。</p>
       </section>
 

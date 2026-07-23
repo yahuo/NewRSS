@@ -4,6 +4,24 @@ const { JSDOM } = require('jsdom');
 
 const { renderAdminPage } = require('../src/admin-page');
 
+test('admin page renders the NewRSS logo beside the heading', () => {
+  const html = renderAdminPage({
+    feeds: [],
+    folders: [],
+    baseUrl: 'http://localhost:8787',
+    readLaterFeedName: 'read-later',
+  });
+  const dom = new JSDOM(html);
+  const heading = dom.window.document.querySelector('.brand-title');
+  const logo = heading.querySelector('.brand-logo');
+
+  assert.equal(heading.textContent.trim(), 'NewRSS Feed 管理');
+  assert.equal(logo.getAttribute('viewBox'), '0 0 28 28');
+  assert.equal(logo.getAttribute('aria-hidden'), 'true');
+  assert.equal(logo.querySelectorAll('circle').length, 1);
+  assert.equal(logo.querySelectorAll('path').length, 2);
+});
+
 test('admin feed list renders a per-feed translation switch', () => {
   const html = renderAdminPage({
     feeds: [
