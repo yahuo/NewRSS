@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/server.js",
     "dev": "node --watch --disable-warning=ExperimentalWarning src/server.js",
+    "backup:database": "node --disable-warning=ExperimentalWarning scripts/backup-database.js",
     "export:entry": "node --disable-warning=ExperimentalWarning scripts/export-entry.js",
     "test": "node --test"
   },
