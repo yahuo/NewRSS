@@ -6,6 +6,7 @@ const path = require('node:path');
 
 const Database = require('../src/db');
 const FeedService = require('../src/feed-service');
+const { stableGuid } = require('../src/utils');
 
 const createService = () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'newrss-feed-service-'));
@@ -199,4 +200,89 @@ test('refresh skips New York Times live items before applying the item limit', a
   assert.equal(fetchCount, 1);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].source_url, 'https://www.nytimes.com/2026/07/20/world/regular-article.html');
+});
+
+test('scheduled and manual refreshes do not overlap', async (t) => {
+  const { db, directory, service } = createService();
+  t.after(() => {
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  service.saveFeed({
+    name: 'LockedFeed',
+    sourceUrl: 'https://example.com/feed.xml',
+    title: 'Locked Feed',
+    translateEnabled: false,
+  });
+
+  let finishParsing;
+  service.parseSourceFeed = () => new Promise((resolve) => { finishParsing = resolve; });
+  const active = service.refreshStoredFeed({ parser: {}, feedName: 'LockedFeed' });
+  const scheduled = await service.tryRefreshAllFeeds({ parser: {} });
+  assert.equal(scheduled.skipped, true);
+  assert.match(scheduled.reason, /feed:LockedFeed/);
+  await assert.rejects(
+    service.refreshStoredFeed({ parser: {}, feedName: 'LockedFeed' }),
+    (error) => error.code === 'REFRESH_IN_PROGRESS'
+  );
+
+  finishParsing({ title: 'Locked Feed', items: [] });
+  await active;
+});
+
+test('translation backoff persists across service restart and content changes clear it', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'newrss-feed-backoff-'));
+  const dbPath = path.join(directory, 'newrss.db');
+  const originalFetch = global.fetch;
+  let articleBody = 'Stable English article body. '.repeat(50);
+  global.fetch = async () => new Response(`<!doctype html><html><head><title>Article</title></head><body><article><p>${articleBody}</p></article></body></html>`, { status: 200 });
+  let db = new Database(dbPath);
+  t.after(() => {
+    global.fetch = originalFetch;
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const config = {
+    appBaseUrl: '', defaultFeedName: '', defaultFeedUrl: '', httpTimeoutMs: 5_000,
+    maxItemsPerFeed: 50, maxItemsPerRefresh: 10, upstreamProxyUrl: '', userAgent: 'NewRSS test',
+  };
+  const item = { guid: 'article-1', title: 'English article title', link: 'https://example.com/article' };
+  const sourceGuid = stableGuid(item);
+  let service = new FeedService({ db, config });
+  service.saveFeed({
+    name: 'BackoffFeed', sourceUrl: 'https://example.com/feed.xml', title: 'Backoff', translateEnabled: true,
+  });
+  service.parseSourceFeed = async () => ({ title: 'Backoff', items: [item] });
+  service.translationService.shouldTranslate = () => true;
+  service.translationService.translateArticle = async () => { throw new Error('translation timeout'); };
+
+  const first = await service.refreshStoredFeed({ parser: {}, feedName: 'BackoffFeed' });
+  assert.equal(first.items[0].status, 'error');
+  let entry = db.getEntryByFeedAndGuid('BackoffFeed', sourceGuid);
+  assert.equal(entry.translation_failure_count, 1);
+  assert.ok(entry.translation_retry_after > entry.translation_last_failed_at);
+
+  db.db.close();
+  db = new Database(dbPath);
+  service = new FeedService({ db, config });
+  service.parseSourceFeed = async () => ({ title: 'Backoff', items: [item] });
+  service.translationService.shouldTranslate = () => true;
+  let translationCalls = 0;
+  service.translationService.translateArticle = async () => {
+    translationCalls += 1;
+    return { translatedTitle: '中文标题', translatedContentHtml: '<p>中文正文</p>', provider: 'test' };
+  };
+
+  const second = await service.refreshStoredFeed({ parser: {}, feedName: 'BackoffFeed' });
+  assert.equal(second.items[0].status, 'backoff');
+  assert.equal(translationCalls, 0);
+  assert.equal(db.getEntryByFeedAndGuid('BackoffFeed', sourceGuid).translation_failure_count, 1);
+
+  articleBody = 'Changed English article body. '.repeat(50);
+  const third = await service.refreshStoredFeed({ parser: {}, feedName: 'BackoffFeed' });
+  assert.equal(third.items[0].status, 'ok');
+  assert.equal(translationCalls, 1);
+  entry = db.getEntryByFeedAndGuid('BackoffFeed', sourceGuid);
+  assert.equal(entry.translation_failure_count, 0);
+  assert.equal(entry.translation_retry_after, null);
 });

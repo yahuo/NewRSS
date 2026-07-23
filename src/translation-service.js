@@ -11,10 +11,12 @@ const MAX_TRANSLATABLE_CHARS = 120_000;
 const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120;
+const CODEX_PROVIDER = 'codex-oauth';
+const CODEX_PROBE_DELAYS_MINUTES = [15, 30, 60, 120];
 
 class TranslationService {
-  constructor(config) {
-    this.config = config;
+  constructor(config, { db = null } = {}) {
+    this.config = { ...config, translationStore: db };
   }
 
   isEnabled() {
@@ -125,7 +127,7 @@ class TranslationService {
 
     const translatedChunks = await mapWithConcurrency(
       chunks,
-      Math.max(1, Number(this.config.geminiChunkConcurrency) || 3),
+      getChunkConcurrency(this.config),
       (chunk, index) =>
         this.translateMarkdownChunk({
           sourceTitle,
@@ -199,7 +201,7 @@ class TranslationService {
 
     const translatedChunks = await mapWithConcurrency(
       htmlPlan.chunks,
-      Math.max(1, Number(this.config.geminiChunkConcurrency) || 3),
+      getChunkConcurrency(this.config),
       (chunkHtml, index) =>
         this.translateHtmlChunk({
           sourceTitle,
@@ -241,6 +243,41 @@ class TranslationService {
 
     return unwrapTranslatedHtmlChunk(translated);
   }
+
+  getCodexStatus() {
+    if (getTranslationProvider(this.config) !== CODEX_PROVIDER || !this.config.translationStore) {
+      return null;
+    }
+
+    return {
+      circuit: this.config.translationStore.getTranslationCircuit(CODEX_PROVIDER),
+      usage: this.config.translationStore.getTranslationUsageSummary(CODEX_PROVIDER),
+    };
+  }
+
+  async probeCodex({ force = false } = {}) {
+    if (getTranslationProvider(this.config) !== CODEX_PROVIDER) {
+      throw new Error('Codex OAuth is not the active translation provider');
+    }
+    if (!this.config.translationStore) {
+      throw new Error('Codex circuit persistence is unavailable');
+    }
+
+    const now = new Date().toISOString();
+    const claim = this.config.translationStore.claimTranslationProbe(CODEX_PROVIDER, now, force);
+    if (!claim.claimed) {
+      return { probed: false, circuit: claim.circuit };
+    }
+
+    try {
+      await callCodexText({ config: this.config, prompt: 'Reply OK.', probe: true });
+      const circuit = this.config.translationStore.closeTranslationCircuit(CODEX_PROVIDER, new Date().toISOString());
+      return { probed: true, ok: true, circuit };
+    } catch (error) {
+      const circuit = openCodexCircuit(this.config, error);
+      return { probed: true, ok: false, error: error.message, circuit };
+    }
+  }
 }
 
 module.exports = TranslationService;
@@ -254,6 +291,13 @@ function getTranslationModel(config) {
   return getTranslationProvider(config) === 'codex-oauth'
     ? String(config.codexModel || 'openai-codex/gpt-5.5').trim()
     : String(config.geminiModel || 'gemini-2.5-flash').trim();
+}
+
+function getChunkConcurrency(config) {
+  if (getTranslationProvider(config) === CODEX_PROVIDER) {
+    return 1;
+  }
+  return Math.max(1, Number(config.geminiChunkConcurrency) || 3);
 }
 
 async function callTranslationJson({ config, prompt }) {
@@ -368,14 +412,47 @@ async function callGeminiText({ apiKey, model, timeoutMs, prompt }) {
   return fetchGeminiContent({ apiKey, model, timeoutMs, prompt });
 }
 
-async function callCodexText({ config, prompt }) {
+async function callCodexText({ config, prompt, probe = false }) {
+  const store = config.translationStore;
+  if (!probe && store) {
+    const circuit = store.getTranslationCircuit(CODEX_PROVIDER);
+    if (circuit.state !== 'closed') {
+      const error = new Error(`Codex circuit is ${circuit.state}${circuit.next_probe_at ? ` until ${circuit.next_probe_at}` : ''}`);
+      error.code = 'CODEX_CIRCUIT_OPEN';
+      error.retryAfter = circuit.next_probe_at || null;
+      throw error;
+    }
+  }
+
   const auth = await resolveCodexAuth(config);
   const baseUrl = String(config.codexBaseUrl || 'https://chatgpt.com/backend-api/codex').replace(/\/+$/, '');
   const timeoutMs = Number(config.codexTimeoutMs) || Number(config.geminiTimeoutMs) || 90_000;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+  const requestKind = probe ? 'probe' : 'translation';
+  const createdAt = new Date().toISOString();
+  let responseRaw = '';
   try {
+    const body = {
+      model: getCodexApiModel(getTranslationModel(config)),
+      instructions: probe
+        ? 'Return only OK.'
+        : 'You are a precise translation engine. Follow the user prompt exactly and return only the requested translation output.',
+      input: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'input_text',
+              text: prompt,
+            },
+          ],
+        },
+      ],
+      store: false,
+      stream: true,
+    };
     const response = await fetch(`${baseUrl}/responses`, {
       method: 'POST',
       signal: controller.signal,
@@ -384,26 +461,11 @@ async function callCodexText({ config, prompt }) {
         authorization: `Bearer ${auth.accessToken}`,
         ...buildCodexHeaders(auth.accessToken),
       },
-      body: JSON.stringify({
-        model: getCodexApiModel(getTranslationModel(config)),
-        instructions: 'You are a precise translation engine. Follow the user prompt exactly and return only the requested translation output.',
-        input: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'input_text',
-                text: prompt,
-              },
-            ],
-          },
-        ],
-        store: false,
-        stream: true,
-      }),
+      body: JSON.stringify(body),
     });
 
     const raw = await response.text();
+    responseRaw = raw;
     if (!response.ok) {
       const payload = parseJson(raw);
       const message =
@@ -411,18 +473,91 @@ async function callCodexText({ config, prompt }) {
         payload?.error?.message ||
         payload?.error?.code ||
         `Codex request failed with status ${response.status}`;
-      throw new Error(message);
+      const error = new Error(message);
+      error.retryAfter = readRetryAfter(response, payload);
+      throw error;
+    }
+
+    const streamError = extractCodexStreamError(raw);
+    if (streamError) {
+      throw new Error(streamError);
     }
 
     const text = extractCodexStreamText(raw) || extractCodexResponseText(parseJson(raw));
-    if (!text) {
+    if (!text && !probe) {
       throw new Error('Codex returned no text');
     }
 
-    return text;
+    store?.recordTranslationUsage({
+      provider: CODEX_PROVIDER,
+      model: getTranslationModel(config),
+      requestKind,
+      status: 'ok',
+      usage: extractCodexUsage(raw),
+      error: null,
+      createdAt,
+    });
+
+    return text || 'OK';
+  } catch (error) {
+    store?.recordTranslationUsage({
+      provider: CODEX_PROVIDER,
+      model: getTranslationModel(config),
+      requestKind,
+      status: 'error',
+      usage: extractCodexUsage(responseRaw),
+      error: error.message,
+      createdAt,
+    });
+    if (!probe && isCodexUsageLimitError(error)) {
+      const circuit = openCodexCircuit(config, error);
+      error.retryAfter = circuit.next_probe_at;
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
   }
+}
+
+function openCodexCircuit(config, error) {
+  const store = config.translationStore;
+  if (!store) {
+    return null;
+  }
+  const current = store.getTranslationCircuit(CODEX_PROVIDER);
+  const delayIndex = Math.min(Number(current.failure_count || 0), CODEX_PROBE_DELAYS_MINUTES.length - 1);
+  const now = new Date();
+  const scheduledProbeAt = new Date(now.getTime() + CODEX_PROBE_DELAYS_MINUTES[delayIndex] * 60_000);
+  const responseRetryAt = parseRetryAfter(error.retryAfter, now);
+  const nextProbeAt = responseRetryAt && responseRetryAt > scheduledProbeAt
+    ? responseRetryAt.toISOString()
+    : scheduledProbeAt.toISOString();
+  return store.openTranslationCircuit(CODEX_PROVIDER, error.message, now.toISOString(), nextProbeAt);
+}
+
+function isCodexUsageLimitError(error) {
+  return /usage limit has been reached|usage[_ -]?limit|quota.*(exceeded|reached)|insufficient_quota/i.test(
+    String(error?.message || '')
+  );
+}
+
+function readRetryAfter(response, payload) {
+  const headerValue = response?.headers?.get?.('retry-after') || response?.headers?.get?.('x-ratelimit-reset-requests');
+  return headerValue || payload?.retry_after || payload?.error?.retry_after || payload?.reset_at || null;
+}
+
+function parseRetryAfter(value, now) {
+  if (value == null || value === '') {
+    return null;
+  }
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric >= 0) {
+    return numeric > 1_000_000_000
+      ? new Date(numeric * 1000)
+      : new Date(now.getTime() + numeric * 1000);
+  }
+  const parsed = new Date(String(value));
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
 }
 
 async function resolveCodexAuth(config) {
@@ -567,6 +702,41 @@ function extractCodexStreamText(raw) {
   }
 
   return (doneText || deltas.join('')).trim();
+}
+
+function extractCodexUsage(raw) {
+  const direct = parseJson(raw);
+  const payloads = direct ? [direct] : parseServerSentEvents(raw).map((event) => parseJson(event.data)).filter(Boolean);
+  let usage = null;
+  for (const payload of payloads) {
+    usage = payload?.response?.usage || payload?.usage || usage;
+  }
+  if (!usage) {
+    return null;
+  }
+
+  return {
+    inputTokens: integerUsage(usage.input_tokens ?? usage.prompt_tokens),
+    outputTokens: integerUsage(usage.output_tokens ?? usage.completion_tokens),
+    totalTokens: integerUsage(usage.total_tokens),
+  };
+}
+
+function extractCodexStreamError(raw) {
+  for (const event of parseServerSentEvents(raw)) {
+    const payload = parseJson(event.data);
+    const message = payload?.error?.message || payload?.response?.error?.message ||
+      (payload?.type === 'error' ? payload?.message : null);
+    if (message) {
+      return String(message);
+    }
+  }
+  return '';
+}
+
+function integerUsage(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : null;
 }
 
 function parseServerSentEvents(raw) {

@@ -94,3 +94,16 @@ test('admin page accepts a display title and renders an in-progress refresh stat
   assert.ok(request);
   assert.equal(Object.hasOwn(JSON.parse(request.options.body), 'title'), false);
 });
+
+test('admin page exposes Codex status and an immediate quota probe button', () => {
+  const html = renderAdminPage({
+    feeds: [],
+    folders: [],
+    baseUrl: 'http://localhost:8787',
+    readLaterFeedName: 'read-later',
+  });
+  assert.match(html, /立即检测 Codex 额度/);
+  assert.match(html, /\/api\/codex\/status/);
+  assert.match(html, /\/api\/codex\/probe/);
+  assert.match(html, /input\/output\/total/);
+});

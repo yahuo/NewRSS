@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const Database = require('../src/db');
 const TranslationService = require('../src/translation-service');
 
 test('codex-oauth provider uses the configured auth file and Responses API', async () => {
@@ -179,6 +180,113 @@ test('codex-oauth provider is disabled when the auth file is missing', () => {
   assert.equal(service.isEnabled(), false);
 });
 
+test('codex usage-limit opens a persistent circuit and blocks later requests', async (t) => {
+  const fixture = createCodexFixture(t);
+  let fetchCount = 0;
+  const previousFetch = global.fetch;
+  global.fetch = async () => {
+    fetchCount += 1;
+    return textResponse(JSON.stringify({ detail: 'The usage limit has been reached' }), 429);
+  };
+  t.after(() => { global.fetch = previousFetch; });
+
+  const service = new TranslationService(fixture.config, { db: fixture.db });
+  await assert.rejects(service.translateTitle({ title: 'First title', sourceUrl: '' }), /usage limit/);
+  await assert.rejects(service.translateTitle({ title: 'Second title', sourceUrl: '' }), /circuit is open/);
+
+  assert.equal(fetchCount, 1);
+  const circuit = fixture.db.getTranslationCircuit('codex-oauth');
+  assert.equal(circuit.state, 'open');
+  assert.equal(circuit.failure_count, 1);
+  assert.ok(new Date(circuit.next_probe_at) > new Date(circuit.opened_at));
+  const usage = fixture.db.getTranslationUsageSummary('codex-oauth');
+  assert.equal(usage.totals.request_count, 1);
+  assert.equal(usage.recent[0].status, 'error');
+  assert.equal(usage.recent[0].input_tokens, null);
+});
+
+test('codex probe uses escalating intervals and a successful probe closes the circuit', async (t) => {
+  const fixture = createCodexFixture(t);
+  const service = new TranslationService(fixture.config, { db: fixture.db });
+  const previousFetch = global.fetch;
+  let fail = true;
+  let successfulProbeBody = null;
+  global.fetch = async (url, options) => {
+    if (fail) {
+      return textResponse(JSON.stringify({ detail: 'The usage limit has been reached' }), 429);
+    }
+    successfulProbeBody = JSON.parse(options.body);
+    return textResponse('event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}\n\n');
+  };
+  t.after(() => { global.fetch = previousFetch; });
+
+  await assert.rejects(service.translateTitle({ title: 'Open circuit', sourceUrl: '' }), /usage limit/);
+  let circuit = fixture.db.getTranslationCircuit('codex-oauth');
+  const firstDelayMinutes = (new Date(circuit.next_probe_at) - new Date(circuit.updated_at)) / 60_000;
+  assert.ok(firstDelayMinutes >= 14.9 && firstDelayMinutes <= 15.1);
+
+  fixture.db.db.prepare(`UPDATE translation_circuits SET next_probe_at = ? WHERE provider = ?`).run(
+    new Date(Date.now() - 1000).toISOString(),
+    'codex-oauth'
+  );
+  const failedProbe = await service.probeCodex();
+  assert.equal(failedProbe.ok, false);
+  circuit = fixture.db.getTranslationCircuit('codex-oauth');
+  const secondDelayMinutes = (new Date(circuit.next_probe_at) - new Date(circuit.updated_at)) / 60_000;
+  assert.ok(secondDelayMinutes >= 29.9 && secondDelayMinutes <= 30.1);
+
+  fixture.db.db.prepare(`UPDATE translation_circuits SET next_probe_at = ? WHERE provider = ?`).run(
+    new Date(Date.now() - 1000).toISOString(),
+    'codex-oauth'
+  );
+  fail = false;
+  const successfulProbe = await service.probeCodex();
+  assert.equal(successfulProbe.ok, true);
+  assert.equal(fixture.db.getTranslationCircuit('codex-oauth').state, 'closed');
+  assert.equal(successfulProbeBody.input[0].content[0].text, 'Reply OK.');
+  assert.equal(Object.hasOwn(successfulProbeBody, 'max_output_tokens'), false);
+});
+
+test('codex streaming completion usage is persisted and missing usage stays null', async (t) => {
+  const fixture = createCodexFixture(t);
+  const responses = [
+    'event: response.output_text.done\ndata: {"type":"response.output_text.done","text":"标题一"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}}\n\n',
+    'event: response.output_text.done\ndata: {"type":"response.output_text.done","text":"标题二"}\n\n',
+  ];
+  const previousFetch = global.fetch;
+  global.fetch = async () => textResponse(responses.shift());
+  t.after(() => { global.fetch = previousFetch; });
+
+  const service = new TranslationService(fixture.config, { db: fixture.db });
+  await service.translateTitle({ title: 'One', sourceUrl: '' });
+  await service.translateTitle({ title: 'Two', sourceUrl: '' });
+  const recent = fixture.db.getTranslationUsageSummary('codex-oauth').recent;
+  assert.equal(recent[1].input_tokens, 12);
+  assert.equal(recent[1].output_tokens, 3);
+  assert.equal(recent[1].total_tokens, 15);
+  assert.equal(recent[0].input_tokens, null);
+  assert.equal(recent[0].total_tokens, null);
+});
+
+test('codex chunk translation is serial and stops after the first failed chunk', async (t) => {
+  const fixture = createCodexFixture(t, { geminiChunkMaxWords: 5, geminiChunkConcurrency: 3 });
+  let fetchCount = 0;
+  const previousFetch = global.fetch;
+  global.fetch = async () => {
+    fetchCount += 1;
+    return textResponse(JSON.stringify({ error: { message: 'temporary failure' } }), 500);
+  };
+  t.after(() => { global.fetch = previousFetch; });
+
+  const service = new TranslationService(fixture.config, { db: fixture.db });
+  await assert.rejects(service.translateArticle({
+    sourceTitle: 'A long English title for testing',
+    contentHtml: Array.from({ length: 8 }, (_, index) => `<p>Paragraph ${index} contains enough English words to require another chunk.</p>`).join(''),
+    sourceUrl: 'https://example.com/chunked',
+  }), /temporary failure/);
+  assert.equal(fetchCount, 1);
+});
+
 function jsonResponse(payload, status = 200) {
   return {
     ok: status >= 200 && status < 300,
@@ -209,4 +317,34 @@ function base64Url(value) {
     .replace(/=/g, '')
     .replace(/\+/g, '-')
     .replace(/\//g, '_');
+}
+
+function createCodexFixture(t, overrides = {}) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'newrss-codex-state-'));
+  const authFile = path.join(directory, 'auth.json');
+  fs.writeFileSync(authFile, JSON.stringify({
+    tokens: {
+      access_token: fakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+      refresh_token: 'refresh-token',
+    },
+  }));
+  const db = new Database(path.join(directory, 'newrss.db'));
+  t.after(() => {
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  return {
+    db,
+    config: {
+      translationProvider: 'codex-oauth',
+      codexAuthFile: authFile,
+      codexBaseUrl: 'https://chatgpt.com/backend-api/codex',
+      codexModel: 'openai-codex/gpt-5.5',
+      codexTimeoutMs: 5000,
+      geminiChunkMaxWords: 2000,
+      geminiChunkConcurrency: 3,
+      translateTargetLanguage: 'Simplified Chinese',
+      ...overrides,
+    },
+  };
 }

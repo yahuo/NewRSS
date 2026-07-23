@@ -343,6 +343,12 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
 
       <section class="layout">
         <aside class="card">
+          <h2>Codex 额度保护</h2>
+          <div class="stack">
+            <div class="hint" id="codex-status">正在读取状态…</div>
+            <button id="codex-probe" type="button">立即检测 Codex 额度</button>
+          </div>
+          <hr class="section-divider" />
           <h2>新增或更新源</h2>
           <form id="feed-form" class="stack">
             <label>
@@ -451,10 +457,51 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
       const readLaterStatus = document.getElementById('read-later-status');
       const opmlForm = document.getElementById('opml-form');
       const opmlStatus = document.getElementById('opml-status');
+      const codexStatus = document.getElementById('codex-status');
+      const codexProbe = document.getElementById('codex-probe');
       const readLaterFeedName = ${JSON.stringify(readLaterFeedName)};
       const appBaseUrl = ${JSON.stringify(baseUrl)};
 
       render(initialFeeds);
+      loadCodexStatus();
+
+      codexProbe.addEventListener('click', async () => {
+        codexProbe.disabled = true;
+        codexStatus.textContent = '正在执行最小额度探测…';
+        try {
+          const response = await fetch('/api/codex/probe', { method: 'POST' });
+          const data = await response.json();
+          const probeError = data.result?.error || data.error || '探测失败';
+          await loadCodexStatus();
+          if (!response.ok || !data.ok) codexStatus.textContent += '；检测结果：' + probeError;
+        } catch (error) {
+          codexStatus.textContent = error.message;
+        } finally {
+          codexProbe.disabled = false;
+        }
+      });
+
+      async function loadCodexStatus() {
+        const response = await fetch('/api/codex/status');
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          codexStatus.textContent = data.error || 'Codex 状态不可用';
+          codexProbe.disabled = true;
+          return;
+        }
+        const circuit = data.circuit || {};
+        const totals = data.usage?.totals || {};
+        codexStatus.textContent = [
+          '熔断状态：' + (circuit.state || 'closed'),
+          circuit.next_probe_at ? '下次自动探测：' + circuit.next_probe_at : '',
+          '已记录请求：' + Number(totals.request_count || 0),
+          'input/output/total：' + formatUsage(totals.input_tokens) + '/' + formatUsage(totals.output_tokens) + '/' + formatUsage(totals.total_tokens),
+        ].filter(Boolean).join('；');
+      }
+
+      function formatUsage(value) {
+        return value == null ? '不可得' : String(value);
+      }
 
       form.addEventListener('submit', async (event) => {
         event.preventDefault();

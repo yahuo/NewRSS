@@ -21,7 +21,7 @@ class ReadLaterService {
     this.db = db;
     this.config = config;
     this.feedService = feedService;
-    this.translationService = new TranslationService(buildReadLaterTranslationConfig(config));
+    this.translationService = new TranslationService(buildReadLaterTranslationConfig(config), { db });
   }
 
   async saveUrl({ request, url, title = '', mode = 'auto', translate = true }) {

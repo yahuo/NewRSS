@@ -6,6 +6,7 @@ const FeedService = require('./feed-service');
 const ReadLaterService = require('./read-later-service');
 const { renderAdminPage } = require('./admin-page');
 const { parseOpml } = require('./opml');
+const { scheduleRefreshes } = require('./refresh-scheduler');
 const {
   buildFeedNameFromUrl: buildFeedNameFromUrlUtil,
   isManagedFeedSourceUrl,
@@ -71,7 +72,7 @@ app.get('/refresh', async (request, response) => {
       result,
     });
   } catch (error) {
-    response.status(500).json({
+    response.status(error.code === 'REFRESH_IN_PROGRESS' ? 409 : 500).json({
       ok: false,
       error: error.message,
     });
@@ -210,10 +211,28 @@ app.post('/api/feeds/:name/refresh', async (request, response) => {
       result,
     });
   } catch (error) {
-    response.status(error.message.includes('not found') ? 404 : 500).json({
+    response.status(error.message.includes('not found') ? 404 : error.code === 'REFRESH_IN_PROGRESS' ? 409 : 500).json({
       ok: false,
       error: error.message,
     });
+  }
+});
+
+app.get('/api/codex/status', (request, response) => {
+  const status = feedService.getCodexStatus();
+  if (!status) {
+    response.status(404).json({ ok: false, error: 'Codex OAuth is not the active translation provider' });
+    return;
+  }
+  response.json({ ok: true, ...status });
+});
+
+app.post('/api/codex/probe', async (request, response) => {
+  try {
+    const result = await feedService.probeCodex({ force: true });
+    response.status(result.ok === false ? 503 : 200).json({ ok: result.ok !== false, result });
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message });
   }
 });
 
@@ -432,23 +451,7 @@ app.get('/articles/:id', (request, response) => {
 
 const scheduleDefaultRefresh = () => {
   feedService.ensureBootstrapFeed();
-
-  const run = async () => {
-    try {
-      const results = await feedService.refreshAllFeeds({ parser });
-      console.log(`[refresh] completed for ${results.length} feeds`);
-    } catch (error) {
-      console.error(`[refresh] failed: ${error.message}`);
-    }
-  };
-
-  if (config.refreshOnBoot) {
-    run();
-  }
-
-  if (config.refreshIntervalMinutes > 0) {
-    setInterval(run, config.refreshIntervalMinutes * 60 * 1000);
-  }
+  scheduleRefreshes({ feedService, parser, config });
 };
 
 app.listen(config.port, config.host, () => {

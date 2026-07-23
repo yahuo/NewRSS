@@ -17,7 +17,8 @@ class FeedService {
   constructor({ db, config }) {
     this.db = db;
     this.config = config;
-    this.translationService = new TranslationService(config);
+    this.translationService = new TranslationService(config, { db });
+    this.activeRefresh = null;
   }
 
   baseUrl(request) {
@@ -222,7 +223,13 @@ class FeedService {
     return this.db.deleteFeed(name);
   }
 
-  async refreshFeed({ parser, feedName, sourceUrl }) {
+  async refreshFeed({ parser, feedName, sourceUrl, lockHeld = false }) {
+    if (!lockHeld) {
+      return this.withRefreshLock(`feed:${feedName}`, false, () =>
+        this.refreshFeed({ parser, feedName, sourceUrl, lockHeld: true })
+      );
+    }
+
     const refreshedAt = isoNow();
 
     try {
@@ -253,6 +260,9 @@ class FeedService {
       const createdAt = refreshedAt;
       const updatedAt = refreshedAt;
       const existingEntry = this.db.getEntryByFeedAndGuid(feedName, sourceGuid);
+      let resolvedSourceTitle = '';
+      let resolvedExtractedContentHtml = '';
+      let translationStateReset = false;
 
       try {
         const resolved = await resolveArticleContent(item, {
@@ -267,12 +277,27 @@ class FeedService {
         const sourceTitle = item.title || resolved.title || item.link || 'Untitled';
         const sourceContentHtml = item['content:encoded'] || item.content || item.contentSnippet || '';
         const extractedContentHtml = resolved.html || sourceContentHtml || '';
+        resolvedSourceTitle = sourceTitle;
+        resolvedExtractedContentHtml = extractedContentHtml;
+        const contentChanged = Boolean(existingEntry) && (
+          (existingEntry.source_title || '') !== sourceTitle ||
+          (existingEntry.extracted_content_html || '') !== extractedContentHtml
+        );
+        if (contentChanged) {
+          this.db.clearEntryTranslationFailure(feedName, sourceGuid);
+          translationStateReset = true;
+        }
+        const translationBackoffActive =
+          translateEnabled &&
+          !contentChanged &&
+          Boolean(existingEntry?.translation_retry_after) &&
+          existingEntry.translation_retry_after > refreshedAt;
         const reuseExistingTranslation =
           translateEnabled &&
           Boolean(existingEntry?.translated_content_html) &&
           (existingEntry?.source_title || '') === sourceTitle &&
           (existingEntry?.extracted_content_html || '') === extractedContentHtml;
-        const translation = reuseExistingTranslation
+        const translation = reuseExistingTranslation || translationBackoffActive
           ? null
           : await this.maybeTranslateFeedEntry({
               feedName,
@@ -312,14 +337,19 @@ class FeedService {
           updatedAt,
         });
 
+        if (!translationBackoffActive) {
+          this.db.clearEntryTranslationFailure(feedName, sourceGuid);
+        }
+
         results.push({
           guid: sourceGuid,
-          status: 'ok',
+          status: translationBackoffActive ? 'backoff' : 'ok',
           title: displayTitle,
+          retryAfter: translationBackoffActive ? existingEntry.translation_retry_after : null,
         });
       } catch (error) {
         const sourceContentHtml = item['content:encoded'] || item.content || item.contentSnippet || existingEntry?.source_content_html || '';
-        const extractedContentHtml = existingEntry?.extracted_content_html || '';
+        const extractedContentHtml = resolvedExtractedContentHtml || existingEntry?.extracted_content_html || '';
         const translatedTitle = existingEntry?.translated_title || null;
         const translatedContentHtml = existingEntry?.translated_content_html || null;
         const displayContentHtml = translatedContentHtml || extractedContentHtml || sourceContentHtml;
@@ -328,7 +358,7 @@ class FeedService {
           feedName,
           sourceGuid,
           sourceUrl: item.link || sourceUrl,
-          sourceTitle: item.title || existingEntry?.source_title || item.link || 'Untitled',
+          sourceTitle: resolvedSourceTitle || item.title || existingEntry?.source_title || item.link || 'Untitled',
           sourceAuthor: item.creator || item.author || existingEntry?.source_author || '',
           sourcePublishedAt: item.isoDate || item.pubDate || existingEntry?.source_published_at || null,
           sourceContentHtml,
@@ -343,6 +373,11 @@ class FeedService {
           createdAt,
           updatedAt,
         });
+
+        if (error.translationFailure) {
+          const retryAfter = nextTranslationRetryAt(translationStateReset ? null : existingEntry, refreshedAt, error.retryAfter);
+          this.db.recordEntryTranslationFailure(feedName, sourceGuid, error.message, refreshedAt, retryAfter);
+        }
 
         results.push({
           guid: sourceGuid,
@@ -394,6 +429,14 @@ class FeedService {
   }
 
   async refreshAllFeeds({ parser }) {
+    return this.withRefreshLock('all-feeds', false, () => this.refreshAllFeedsUnlocked({ parser }));
+  }
+
+  async tryRefreshAllFeeds({ parser }) {
+    return this.withRefreshLock('scheduled-all-feeds', true, () => this.refreshAllFeedsUnlocked({ parser }));
+  }
+
+  async refreshAllFeedsUnlocked({ parser }) {
     this.ensureBootstrapFeed();
     const feeds = this.db.listFeeds().filter((feed) => !isManagedFeedSourceUrl(feed.source_url));
     const results = [];
@@ -404,6 +447,7 @@ class FeedService {
           parser,
           feedName: feed.name,
           sourceUrl: feed.source_url,
+          lockHeld: true,
         });
         results.push({
           feedName: feed.name,
@@ -425,6 +469,36 @@ class FeedService {
     return results;
   }
 
+  async withRefreshLock(label, skipIfBusy, operation) {
+    if (this.activeRefresh) {
+      if (skipIfBusy) {
+        return {
+          skipped: true,
+          reason: `refresh already running: ${this.activeRefresh.label}`,
+          startedAt: this.activeRefresh.startedAt,
+        };
+      }
+      const error = new Error(`refresh already running: ${this.activeRefresh.label}`);
+      error.code = 'REFRESH_IN_PROGRESS';
+      throw error;
+    }
+
+    this.activeRefresh = { label, startedAt: isoNow() };
+    try {
+      return await operation();
+    } finally {
+      this.activeRefresh = null;
+    }
+  }
+
+  getCodexStatus() {
+    return this.translationService.getCodexStatus();
+  }
+
+  probeCodex(options) {
+    return this.translationService.probeCodex(options);
+  }
+
   async maybeTranslateFeedEntry({ feedName, translateEnabled, sourceTitle, contentHtml, sourceUrl }) {
     if (!translateEnabled) {
       return null;
@@ -442,7 +516,8 @@ class FeedService {
       });
     } catch (error) {
       console.error(`[translate] skipped for feed ${feedName} ${sourceUrl}: ${error.message}`);
-      return null;
+      error.translationFailure = true;
+      throw error;
     }
   }
 
@@ -551,4 +626,16 @@ function escapeXml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+function nextTranslationRetryAt(existingEntry, failedAt, providerRetryAfter) {
+  const delaysHours = [2, 6, 12, 24];
+  const failureCount = Number(existingEntry?.translation_failure_count || 0) + 1;
+  const delay = delaysHours[Math.min(failureCount - 1, delaysHours.length - 1)] * 60 * 60 * 1000;
+  const localRetryAt = new Date(new Date(failedAt).getTime() + delay);
+  const providerRetryAt = providerRetryAfter ? new Date(providerRetryAfter) : null;
+  const retryAt = providerRetryAt && Number.isFinite(providerRetryAt.getTime()) && providerRetryAt > localRetryAt
+    ? providerRetryAt
+    : localRetryAt;
+  return retryAt.toISOString();
 }

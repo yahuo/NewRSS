@@ -46,9 +46,34 @@ class Database {
         UNIQUE(feed_name, source_guid),
         FOREIGN KEY(feed_name) REFERENCES feeds(name) ON DELETE CASCADE
       );
+
+      CREATE TABLE IF NOT EXISTS translation_circuits (
+        provider TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        opened_at TEXT,
+        next_probe_at TEXT,
+        last_probe_at TEXT,
+        last_error TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS translation_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        request_kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        total_tokens INTEGER,
+        error TEXT,
+        created_at TEXT NOT NULL
+      );
     `);
 
     this.ensureFeedSchema();
+    this.ensureEntrySchema();
 
     this.setFeedRefreshResultStmt = this.db.prepare(`
       UPDATE feeds
@@ -80,7 +105,8 @@ class Database {
         (
           SELECT COUNT(*)
           FROM entries
-          WHERE entries.feed_name = feeds.name AND entries.refresh_status = 'error'
+          WHERE entries.feed_name = feeds.name
+            AND (entries.refresh_status = 'error' OR entries.translation_retry_after IS NOT NULL)
         ) AS error_count
       FROM feeds
       ORDER BY COALESCE(feeds.folder, '') ASC, feeds.created_at ASC, feeds.name ASC
@@ -156,11 +182,31 @@ class Database {
     `);
 
     this.listRecentEntryErrorsByFeedStmt = this.db.prepare(`
-      SELECT id, source_title, source_url, refresh_error, refreshed_at
+      SELECT id, source_title, source_url,
+             COALESCE(translation_last_error, refresh_error) AS refresh_error,
+             COALESCE(translation_last_failed_at, refreshed_at) AS refreshed_at
       FROM entries
-      WHERE feed_name = ? AND refresh_status = 'error'
+      WHERE feed_name = ? AND (refresh_status = 'error' OR translation_retry_after IS NOT NULL)
       ORDER BY refreshed_at DESC, id DESC
       LIMIT ?
+    `);
+
+    this.clearEntryTranslationFailureStmt = this.db.prepare(`
+      UPDATE entries
+      SET translation_failure_count = 0,
+          translation_last_error = NULL,
+          translation_last_failed_at = NULL,
+          translation_retry_after = NULL
+      WHERE feed_name = ? AND source_guid = ?
+    `);
+
+    this.recordEntryTranslationFailureStmt = this.db.prepare(`
+      UPDATE entries
+      SET translation_failure_count = ?,
+          translation_last_error = ?,
+          translation_last_failed_at = ?,
+          translation_retry_after = ?
+      WHERE feed_name = ? AND source_guid = ?
     `);
 
     this.upsertFeedStmt = this.db.prepare(`
@@ -207,6 +253,23 @@ class Database {
 
     if (!hasLastRefreshError) {
       this.db.exec(`ALTER TABLE feeds ADD COLUMN last_refresh_error TEXT;`);
+    }
+  }
+
+  ensureEntrySchema() {
+    const columns = this.db.prepare(`PRAGMA table_info(entries)`).all();
+    const names = new Set(columns.map((column) => column.name));
+    const additions = [
+      ['translation_failure_count', 'INTEGER NOT NULL DEFAULT 0'],
+      ['translation_last_error', 'TEXT'],
+      ['translation_last_failed_at', 'TEXT'],
+      ['translation_retry_after', 'TEXT'],
+    ];
+
+    for (const [name, definition] of additions) {
+      if (!names.has(name)) {
+        this.db.exec(`ALTER TABLE entries ADD COLUMN ${name} ${definition};`);
+      }
     }
   }
 
@@ -300,6 +363,132 @@ class Database {
   listRecentEntryErrorsByFeed(feedName, limit = 3) {
     return this.listRecentEntryErrorsByFeedStmt.all(feedName, limit);
   }
+
+  clearEntryTranslationFailure(feedName, sourceGuid) {
+    this.clearEntryTranslationFailureStmt.run(feedName, sourceGuid);
+  }
+
+  recordEntryTranslationFailure(feedName, sourceGuid, error, failedAt, retryAfter) {
+    const entry = this.getEntryByFeedAndGuid(feedName, sourceGuid);
+    const failureCount = Number(entry?.translation_failure_count || 0) + 1;
+    this.recordEntryTranslationFailureStmt.run(
+      failureCount,
+      String(error || ''),
+      failedAt,
+      retryAfter,
+      feedName,
+      sourceGuid
+    );
+    return failureCount;
+  }
+
+  getTranslationCircuit(provider) {
+    return this.db.prepare(`SELECT * FROM translation_circuits WHERE provider = ?`).get(provider) || {
+      provider,
+      state: 'closed',
+      failure_count: 0,
+      opened_at: null,
+      next_probe_at: null,
+      last_probe_at: null,
+      last_error: null,
+      updated_at: null,
+    };
+  }
+
+  openTranslationCircuit(provider, error, now, nextProbeAt) {
+    const current = this.getTranslationCircuit(provider);
+    const failureCount = Number(current.failure_count || 0) + 1;
+    this.db.prepare(`
+      INSERT INTO translation_circuits (
+        provider, state, failure_count, opened_at, next_probe_at, last_probe_at, last_error, updated_at
+      ) VALUES (?, 'open', ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(provider) DO UPDATE SET
+        state = 'open',
+        failure_count = excluded.failure_count,
+        opened_at = COALESCE(translation_circuits.opened_at, excluded.opened_at),
+        next_probe_at = excluded.next_probe_at,
+        last_probe_at = excluded.last_probe_at,
+        last_error = excluded.last_error,
+        updated_at = excluded.updated_at
+    `).run(provider, failureCount, now, nextProbeAt, current.last_probe_at, String(error || ''), now);
+    return this.getTranslationCircuit(provider);
+  }
+
+  closeTranslationCircuit(provider, now) {
+    this.db.prepare(`
+      INSERT INTO translation_circuits (provider, state, failure_count, updated_at)
+      VALUES (?, 'closed', 0, ?)
+      ON CONFLICT(provider) DO UPDATE SET
+        state = 'closed', failure_count = 0, opened_at = NULL, next_probe_at = NULL,
+        last_error = NULL, updated_at = excluded.updated_at
+    `).run(provider, now);
+    return this.getTranslationCircuit(provider);
+  }
+
+  claimTranslationProbe(provider, now, force = false) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const circuit = this.getTranslationCircuit(provider);
+      const halfOpenStale = circuit.state === 'half-open' && circuit.last_probe_at &&
+        new Date(now).getTime() - new Date(circuit.last_probe_at).getTime() >= 10 * 60_000;
+      const due = force || halfOpenStale || (circuit.state === 'open' && circuit.next_probe_at && circuit.next_probe_at <= now);
+      if ((circuit.state === 'half-open' && !halfOpenStale) || (!force && circuit.state === 'closed') || !due) {
+        this.db.exec('COMMIT');
+        return { claimed: false, circuit };
+      }
+
+      this.db.prepare(`
+        INSERT INTO translation_circuits (provider, state, failure_count, last_probe_at, updated_at)
+        VALUES (?, 'half-open', 0, ?, ?)
+        ON CONFLICT(provider) DO UPDATE SET state = 'half-open', last_probe_at = excluded.last_probe_at, updated_at = excluded.updated_at
+      `).run(provider, now, now);
+      this.db.exec('COMMIT');
+      return { claimed: true, circuit: this.getTranslationCircuit(provider) };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  recordTranslationUsage({ provider, model, requestKind, status, usage, error, createdAt }) {
+    this.db.prepare(`
+      INSERT INTO translation_usage (
+        provider, model, request_kind, status, input_tokens, output_tokens, total_tokens, error, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      provider,
+      model,
+      requestKind,
+      status,
+      integerOrNull(usage?.inputTokens),
+      integerOrNull(usage?.outputTokens),
+      integerOrNull(usage?.totalTokens),
+      error ? String(error) : null,
+      createdAt
+    );
+  }
+
+  getTranslationUsageSummary(provider, limit = 20) {
+    const totals = this.db.prepare(`
+      SELECT COUNT(*) AS request_count,
+             SUM(input_tokens) AS input_tokens,
+             SUM(output_tokens) AS output_tokens,
+             SUM(total_tokens) AS total_tokens
+      FROM translation_usage
+      WHERE provider = ?
+    `).get(provider);
+    const recent = this.db.prepare(`
+      SELECT * FROM translation_usage
+      WHERE provider = ?
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(provider, limit);
+    return { totals, recent };
+  }
 }
 
 module.exports = Database;
+
+function integerOrNull(value) {
+  return Number.isInteger(value) && value >= 0 ? value : null;
+}
