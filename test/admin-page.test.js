@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { JSDOM } = require('jsdom');
 
-const { renderAdminPage } = require('../src/admin-page');
+const { renderAdminPage, renderFaviconSvg } = require('../src/admin-page');
 
 test('admin page renders the NewRSS logo beside the heading', () => {
   const html = renderAdminPage({
@@ -20,6 +20,17 @@ test('admin page renders the NewRSS logo beside the heading', () => {
   assert.equal(logo.getAttribute('aria-hidden'), 'true');
   assert.equal(logo.querySelectorAll('circle').length, 1);
   assert.equal(logo.querySelectorAll('path').length, 2);
+  const favicon = dom.window.document.querySelector('link[rel="icon"]');
+  assert.equal(favicon.getAttribute('type'), 'image/svg+xml');
+  assert.equal(favicon.getAttribute('href'), '/favicon.svg?v=1');
+});
+
+test('favicon reuses the NewRSS RSS mark', () => {
+  const dom = new JSDOM(renderFaviconSvg(), { contentType: 'image/svg+xml' });
+  const svg = dom.window.document.documentElement;
+  assert.equal(svg.getAttribute('viewBox'), '0 0 28 28');
+  assert.equal(svg.querySelectorAll('circle').length, 1);
+  assert.equal(svg.querySelectorAll('path').length, 2);
 });
 
 test('admin feed list renders a per-feed translation switch', () => {

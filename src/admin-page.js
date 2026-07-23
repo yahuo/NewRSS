@@ -5,6 +5,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>NewRSS 管理</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=1" />
     <style>
       :root {
         color-scheme: light;
@@ -913,7 +914,17 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
 
 module.exports = {
   renderAdminPage,
+  renderFaviconSvg,
 };
+
+function renderFaviconSvg() {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28">
+  <rect x="1" y="1" width="26" height="26" rx="7" fill="#fffaf4" stroke="#0f5c9a" stroke-width="1.5" />
+  <circle cx="9" cy="19" r="2.4" fill="#0f5c9a" />
+  <path d="M9 13.5a5.5 5.5 0 0 1 5.5 5.5" fill="none" stroke="#0f5c9a" stroke-width="2.5" stroke-linecap="round" />
+  <path d="M9 8a11 11 0 0 1 11 11" fill="none" stroke="#0f5c9a" stroke-width="2.5" stroke-linecap="round" />
+</svg>`;
+}
 
 function escapeHtml(value) {
   return String(value)

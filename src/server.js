@@ -4,7 +4,7 @@ const config = require('./config');
 const Database = require('./db');
 const FeedService = require('./feed-service');
 const ReadLaterService = require('./read-later-service');
-const { renderAdminPage } = require('./admin-page');
+const { renderAdminPage, renderFaviconSvg } = require('./admin-page');
 const { parseOpml } = require('./opml');
 const { scheduleRefreshes } = require('./refresh-scheduler');
 const {
@@ -52,6 +52,17 @@ app.get('/healthz', (request, response) => {
     ok: true,
     uptimeSeconds: Math.round(process.uptime()),
   });
+});
+
+app.get('/favicon.svg', (request, response) => {
+  response
+    .set('Cache-Control', 'public, max-age=86400')
+    .type('image/svg+xml; charset=utf-8')
+    .send(renderFaviconSvg());
+});
+
+app.get('/favicon.ico', (request, response) => {
+  response.redirect(302, '/favicon.svg?v=1');
 });
 
 app.get('/refresh', async (request, response) => {
