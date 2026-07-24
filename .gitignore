@@ -1,6 +1,14 @@
 node_modules
 data
+backups
 .DS_Store
 .env
+.env.*
+!.env.example
+docker-compose.override.yml
+docker-compose*.bak-*
 .idea
 outputs
+codex
+cookies
+secrets

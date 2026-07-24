@@ -1,10 +1,13 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { fetchText: fetchOutboundText } = require('./outbound-http');
 
 const DEFAULT_BEARER_TOKEN =
   'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
 const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
+const X_PUBLIC_HOSTS = new Set(['x.com', 'abs.twimg.com']);
+const QUERY_INFO_CACHE_TTL_MS = 15 * 60 * 1000;
 
 const FALLBACK_QUERY_ID = 'id8pHQbQi7eZ6P9mA1th1Q';
 const FALLBACK_FEATURE_SWITCHES = [
@@ -138,7 +141,8 @@ const FALLBACK_TWEET_DETAIL_FIELD_TOGGLES = [
   'withDisallowedReplyControls',
 ];
 
-let cachedHomeHtml = null;
+const homeHtmlCache = new Map();
+const queryInfoCache = new Map();
 
 function buildCookieHeader(cookieMap) {
   const entries = Object.entries(cookieMap).filter(([, value]) => value);
@@ -213,27 +217,72 @@ function loadXCookies(config) {
   return cookieMap;
 }
 
-async function fetchText(url, init) {
-  const response = await fetch(url, init);
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`Request failed (${response.status}) for ${url}: ${text.slice(0, 200)}`);
+function cachedLoad(cache, key, loader) {
+  const now = Date.now();
+  const existing = cache.get(key);
+  if (existing && existing.expiresAt > now) {
+    return existing.promise;
   }
-  return text;
+
+  const entry = {
+    expiresAt: now + QUERY_INFO_CACHE_TTL_MS,
+    promise: Promise.resolve().then(loader),
+  };
+  cache.set(key, entry);
+  entry.promise.catch(() => {
+    if (cache.get(key) === entry) {
+      cache.delete(key);
+    }
+  });
+  return entry.promise;
 }
 
-async function fetchHomeHtml(userAgent) {
-  if (cachedHomeHtml?.userAgent === userAgent) {
-    return cachedHomeHtml.html;
+function normalizeHostname(hostname) {
+  return String(hostname || '').trim().toLowerCase().replace(/\.$/, '');
+}
+
+function publicAllowedHosts(config) {
+  const configured = config?.outboundAllowedHosts;
+  const entries = typeof configured === 'string'
+    ? configured.split(',')
+    : configured == null
+      ? []
+      : Array.from(configured);
+  return entries
+    .map(normalizeHostname)
+    .filter((hostname) => hostname && !X_PUBLIC_HOSTS.has(hostname));
+}
+
+async function fetchXText(url, config, headers) {
+  const parsedUrl = new URL(url);
+  if (!X_PUBLIC_HOSTS.has(normalizeHostname(parsedUrl.hostname))) {
+    const error = new Error(`unexpected X request host: ${parsedUrl.hostname}`);
+    error.code = 'X_REQUEST_HOST_INVALID';
+    throw error;
   }
 
-  const html = await fetchText('https://x.com', {
-    headers: {
-      'user-agent': userAgent,
-    },
+  return fetchOutboundText(parsedUrl, {
+    headers,
+    timeoutMs: config?.xTimeoutMs ?? config?.httpTimeoutMs,
+    maxBytes: config?.xMaxBytes,
+    maxRedirects: config?.outboundMaxRedirects,
+    upstreamProxyUrl: config?.upstreamProxyUrl,
+    allowedHosts: publicAllowedHosts(config),
+    fetchImpl: config?.xFetchImpl ?? config?.fetchImpl,
+    lookup: config?.xLookup ?? config?.lookup,
+    dispatcher: config?.xDispatcher ?? config?.dispatcher,
   });
-  cachedHomeHtml = { userAgent, html };
-  return html;
+}
+
+function fetchHomeHtml(userAgent, config) {
+  return cachedLoad(homeHtmlCache, userAgent, () => fetchXText('https://x.com', config, {
+    'user-agent': userAgent,
+  }));
+}
+
+function resetXClientCaches() {
+  homeHtmlCache.clear();
+  queryInfoCache.clear();
 }
 
 function parseStringList(raw) {
@@ -340,10 +389,11 @@ function buildRequestHeaders(cookieMap, config) {
   return headers;
 }
 
-function resolveArticleQueryInfo(userAgent) {
+function resolveArticleQueryInfo(userAgent, config) {
   return resolveGraphqlQueryInfo({
     userAgent,
-    bundlePattern: /"bundle\\.TwitterArticles":"([a-z0-9]+)"/,
+    config,
+    bundlePattern: /"bundle\.TwitterArticles":"([a-z0-9]+)"/,
     chunkUrl: (hash) => `https://abs.twimg.com/responsive-web/client-web/bundle.TwitterArticles.${hash}a.js`,
     operationName: 'ArticleEntityResultByRestId',
     fallbackQueryId: FALLBACK_QUERY_ID,
@@ -352,10 +402,11 @@ function resolveArticleQueryInfo(userAgent) {
   });
 }
 
-function resolveTweetQueryInfo(userAgent) {
+function resolveTweetQueryInfo(userAgent, config) {
   return resolveGraphqlQueryInfo({
     userAgent,
-    bundlePattern: /main\\.([a-z0-9]+)\\.js/,
+    config,
+    bundlePattern: /main\.([a-z0-9]+)\.js/,
     chunkUrl: (hash) => `https://abs.twimg.com/responsive-web/client-web/main.${hash}.js`,
     operationName: 'TweetResultByRestId',
     fallbackQueryId: FALLBACK_TWEET_QUERY_ID,
@@ -364,9 +415,10 @@ function resolveTweetQueryInfo(userAgent) {
   });
 }
 
-function resolveTweetDetailQueryInfo(userAgent) {
+function resolveTweetDetailQueryInfo(userAgent, config) {
   return resolveGraphqlQueryInfo({
     userAgent,
+    config,
     bundlePattern: /api:"([a-zA-Z0-9_-]+)"/,
     chunkUrl: (hash) => `https://abs.twimg.com/responsive-web/client-web/api.${hash}a.js`,
     operationName: 'TweetDetail',
@@ -378,6 +430,7 @@ function resolveTweetDetailQueryInfo(userAgent) {
 
 async function resolveGraphqlQueryInfo({
   userAgent,
+  config,
   bundlePattern,
   chunkUrl,
   operationName,
@@ -385,7 +438,29 @@ async function resolveGraphqlQueryInfo({
   fallbackFeatureSwitches,
   fallbackFieldToggles,
 }) {
-  const html = await fetchHomeHtml(userAgent);
+  return cachedLoad(queryInfoCache, `${userAgent}\0${operationName}`, () => loadGraphqlQueryInfo({
+    userAgent,
+    config,
+    bundlePattern,
+    chunkUrl,
+    operationName,
+    fallbackQueryId,
+    fallbackFeatureSwitches,
+    fallbackFieldToggles,
+  }));
+}
+
+async function loadGraphqlQueryInfo({
+  userAgent,
+  config,
+  bundlePattern,
+  chunkUrl,
+  operationName,
+  fallbackQueryId,
+  fallbackFeatureSwitches,
+  fallbackFieldToggles,
+}) {
+  const html = await fetchHomeHtml(userAgent, config);
   const bundleMatch = html.match(bundlePattern);
   if (!bundleMatch) {
     return {
@@ -396,10 +471,8 @@ async function resolveGraphqlQueryInfo({
     };
   }
 
-  const chunk = await fetchText(chunkUrl(bundleMatch[1]), {
-    headers: {
-      'user-agent': userAgent,
-    },
+  const chunk = await fetchXText(chunkUrl(bundleMatch[1]), config, {
+    'user-agent': userAgent,
   });
   const queryIdMatch = chunk.match(new RegExp(`queryId:\\"([^\\"]+)\\",operationName:\\"${operationName}\\"`));
   const featureMatch = chunk.match(
@@ -420,13 +493,8 @@ async function resolveGraphqlQueryInfo({
   };
 }
 
-async function fetchJson(url, headers) {
-  const response = await fetch(url, { headers });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`X API error (${response.status}): ${text.slice(0, 400)}`);
-  }
-
+async function fetchJson(url, headers, config) {
+  const text = await fetchXText(url, config, headers);
   try {
     return JSON.parse(text);
   } catch (error) {
@@ -468,7 +536,7 @@ function extractArticleFromEntity(payload) {
 
 async function fetchTweetResult(tweetId, cookieMap, config) {
   const userAgent = config.xUserAgent || DEFAULT_USER_AGENT;
-  const queryInfo = await resolveTweetQueryInfo(userAgent);
+  const queryInfo = await resolveTweetQueryInfo(userAgent, config);
   const features = buildFeatureMap(queryInfo.html, queryInfo.featureSwitches);
   const fieldToggles = buildTweetFieldToggleMap(queryInfo.fieldToggles);
   const url = new URL(`https://x.com/i/api/graphql/${queryInfo.queryId}/TweetResultByRestId`);
@@ -488,12 +556,12 @@ async function fetchTweetResult(tweetId, cookieMap, config) {
     url.searchParams.set('fieldToggles', JSON.stringify(fieldToggles));
   }
 
-  return fetchJson(url.toString(), buildRequestHeaders(cookieMap, config));
+  return fetchJson(url.toString(), buildRequestHeaders(cookieMap, config), config);
 }
 
 async function fetchArticleEntityById(articleEntityId, cookieMap, config) {
   const userAgent = config.xUserAgent || DEFAULT_USER_AGENT;
-  const queryInfo = await resolveArticleQueryInfo(userAgent);
+  const queryInfo = await resolveArticleQueryInfo(userAgent, config);
   const features = buildFeatureMap(queryInfo.html, queryInfo.featureSwitches);
   const fieldToggles = buildFieldToggleMap(queryInfo.fieldToggles);
   const url = new URL(`https://x.com/i/api/graphql/${queryInfo.queryId}/ArticleEntityResultByRestId`);
@@ -505,12 +573,12 @@ async function fetchArticleEntityById(articleEntityId, cookieMap, config) {
     url.searchParams.set('fieldToggles', JSON.stringify(fieldToggles));
   }
 
-  return fetchJson(url.toString(), buildRequestHeaders(cookieMap, config));
+  return fetchJson(url.toString(), buildRequestHeaders(cookieMap, config), config);
 }
 
 async function fetchTweetDetail(tweetId, cookieMap, config, cursor) {
   const userAgent = config.xUserAgent || DEFAULT_USER_AGENT;
-  const queryInfo = await resolveTweetDetailQueryInfo(userAgent);
+  const queryInfo = await resolveTweetDetailQueryInfo(userAgent, config);
   const features = buildFeatureMap(
     queryInfo.html,
     queryInfo.featureSwitches,
@@ -545,7 +613,7 @@ async function fetchTweetDetail(tweetId, cookieMap, config, cursor) {
     url.searchParams.set('fieldToggles', JSON.stringify(fieldToggles));
   }
 
-  return fetchJson(url.toString(), buildRequestHeaders(cookieMap, config));
+  return fetchJson(url.toString(), buildRequestHeaders(cookieMap, config), config);
 }
 
 async function fetchXTweet(tweetId, cookieMap, config) {
@@ -572,4 +640,5 @@ module.exports = {
   fetchTweetDetail,
   hasRequiredXCookies,
   loadXCookies,
+  resetXClientCaches,
 };

@@ -4,6 +4,7 @@ const { fetchTweetThread } = require('./x-thread');
 const { extractMarkdownHeadingTitle, normalizeDerivedTitle, normalizeWhitespace } = require('./utils');
 
 const MAX_DERIVED_TITLE_LENGTH = 72;
+const MAX_REFERENCED_TWEETS = 20;
 
 function parseTweetId(input) {
   const trimmed = String(input || '').trim();
@@ -61,6 +62,24 @@ function buildTweetUrl(username, tweetId) {
   }
 
   return `https://x.com/i/web/status/${tweetId}`;
+}
+
+function canonicalXIdentity(input) {
+  const articleId = parseArticleId(input);
+  const tweetId = parseTweetId(input);
+  if (tweetId) {
+    return {
+      identity: `x-tweet:${tweetId}`,
+      url: `https://x.com/i/web/status/${tweetId}`,
+    };
+  }
+  if (articleId) {
+    return {
+      identity: `x-article:${articleId}`,
+      url: `https://x.com/i/article/${articleId}`,
+    };
+  }
+  return null;
 }
 
 function buildAuthor(user) {
@@ -220,7 +239,7 @@ function extractReferencedTweetInfo(tweet, fallbackTweetId) {
 }
 
 async function resolveReferencedTweetsFromArticle(article, cookieMap, config) {
-  const ids = extractReferencedTweetIds(article);
+  const ids = extractReferencedTweetIds(article).slice(0, MAX_REFERENCED_TWEETS);
   const referencedTweets = new Map();
 
   for (const id of ids) {
@@ -373,5 +392,6 @@ async function importXUrl({ url, title = '', config }) {
 }
 
 module.exports = {
+  canonicalXIdentity,
   importXUrl,
 };

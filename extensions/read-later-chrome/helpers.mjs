@@ -1,27 +1,111 @@
-export const NEWRSS_BASE_URL = 'http://macpro.sgponte:8787';
-export const READ_LATER_ENDPOINT = `${NEWRSS_BASE_URL}/api/read-later`;
-export const REQUEST_TIMEOUT_MS = 30_000;
+export const DEFAULT_NEWRSS_BASE_URL = 'http://newrss.local:8787';
+export const BASE_URL_STORAGE_KEY = 'newrssBaseUrl';
+export const PENDING_JOB_STORAGE_PREFIX = 'pendingReadLaterJob:';
+export const REQUEST_TIMEOUT_MS = 10_000;
+export const SUBMISSION_MAX_ATTEMPTS = 2;
+export const JOB_MAX_POLL_ATTEMPTS = 20;
+export const JOB_RECOVERY_ALARM_NAME = 'readLaterJobRecovery';
+export const JOB_RECOVERY_DELAY_MINUTES = 0.5;
 export const NOTIFICATION_ICON_PATH = 'icon-128.png';
 
 const SUPPORTED_PROTOCOLS = new Set(['http:', 'https:']);
+const JOB_STATUSES = new Set(['queued', 'running', 'done', 'failed']);
 const DEFAULT_SAVE_MODE = 'auto';
 const DEFAULT_TRANSLATE = true;
 
-export function isSupportedPageUrl(rawUrl) {
+export function normalizeBaseUrl(rawUrl) {
+  const parsed = new URL(String(rawUrl || '').trim());
+  if (!SUPPORTED_PROTOCOLS.has(parsed.protocol) || parsed.username || parsed.password) {
+    throw new Error('NewRSS 地址必须是无账号信息的 HTTP 或 HTTPS 地址。');
+  }
+
+  return parsed.origin;
+}
+
+export function buildJobsEndpoint(baseUrl) {
+  return `${normalizeBaseUrl(baseUrl)}/api/read-later/jobs`;
+}
+
+export function buildJobEndpoint(baseUrl, jobId) {
+  return `${buildJobsEndpoint(baseUrl)}/${encodeURIComponent(String(jobId || '').trim())}`;
+}
+
+export function buildOriginPattern(baseUrl) {
+  return `${normalizeBaseUrl(baseUrl)}/*`;
+}
+
+export function normalizePageUrl(rawUrl) {
   try {
     const parsed = new URL(String(rawUrl || '').trim());
-    return SUPPORTED_PROTOCOLS.has(parsed.protocol);
+    if (!SUPPORTED_PROTOCOLS.has(parsed.protocol)) {
+      return '';
+    }
+
+    parsed.hash = '';
+    return parsed.toString();
   } catch {
-    return false;
+    return '';
   }
+}
+
+export function isSupportedPageUrl(rawUrl) {
+  return Boolean(normalizePageUrl(rawUrl));
 }
 
 export function buildSavePayload(tab = {}) {
   return {
-    url: String(tab.url || '').trim(),
+    url: normalizePageUrl(tab.url),
     mode: DEFAULT_SAVE_MODE,
     translate: DEFAULT_TRANSLATE,
   };
+}
+
+export function createIdempotencyKey() {
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+
+  return `read-later-${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
+}
+
+export function parseJobSubmission(responseStatus, data) {
+  if (responseStatus !== 202) {
+    throw new Error(`API_ERROR:${extractApiError(data, responseStatus)}`);
+  }
+
+  return parseJobPayload(data, responseStatus, false);
+}
+
+export function parseJobStatus(responseStatus, data) {
+  if (responseStatus < 200 || responseStatus >= 300) {
+    throw new Error(`API_ERROR:${extractApiError(data, responseStatus)}`);
+  }
+
+  return parseJobPayload(data, responseStatus, true);
+}
+
+export function validateArticleUrl(rawUrl, baseUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    const expectedOrigin = normalizeBaseUrl(baseUrl);
+    if (
+      parsed.origin !== expectedOrigin ||
+      parsed.username ||
+      parsed.password ||
+      !parsed.pathname.startsWith('/articles/') ||
+      parsed.pathname === '/articles/'
+    ) {
+      return '';
+    }
+
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+export function pendingJobStorageKey(jobId) {
+  return `${PENDING_JOB_STORAGE_PREFIX}${String(jobId || '').trim()}`;
 }
 
 export function buildSaveSuccessNotification(result = {}) {
@@ -40,7 +124,7 @@ export function unsupportedUrlMessage(rawUrl) {
   return `当前页面不支持保存：${rawUrl}`;
 }
 
-export function humanizeSaveError(error) {
+export function humanizeSaveError(error, baseUrl = DEFAULT_NEWRSS_BASE_URL) {
   if (!error) {
     return '保存失败，请稍后重试。';
   }
@@ -56,7 +140,7 @@ export function humanizeSaveError(error) {
   }
 
   if (message.startsWith('NETWORK_ERROR:')) {
-    return `无法连接到 NewRSS 服务，请检查 ${NEWRSS_BASE_URL} 是否可达。`;
+    return `无法连接到 NewRSS 服务，请检查 ${baseUrl} 是否可达。`;
   }
 
   if (message.startsWith('API_ERROR:')) {
@@ -87,12 +171,24 @@ export function extractApiError(data, responseStatus) {
   return `NewRSS 返回了异常状态码 ${responseStatus}。`;
 }
 
-export function parseSaveResponse(responseStatus, data) {
-  if (data?.ok === true && data?.result) {
-    return data.result;
+function parseJobPayload(data, responseStatus, requireDoneResult) {
+  const jobId = String(data?.jobId || '').trim();
+  const status = String(data?.status || '').trim().toLowerCase();
+
+  if (!jobId || !JOB_STATUSES.has(status)) {
+    throw new Error(`API_ERROR:NewRSS 返回了无效的任务状态（HTTP ${responseStatus}）。`);
   }
 
-  throw new Error(`API_ERROR:${extractApiError(data, responseStatus)}`);
+  if (requireDoneResult && status === 'done' && (!data.result || typeof data.result !== 'object')) {
+    throw new Error('API_ERROR:NewRSS 已完成任务，但没有返回保存结果。');
+  }
+
+  return {
+    jobId,
+    status,
+    result: data.result && typeof data.result === 'object' ? data.result : null,
+    error: String(data.error || '').trim(),
+  };
 }
 
 function truncateText(text, maxLength) {

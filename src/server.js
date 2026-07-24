@@ -1,21 +1,36 @@
 const express = require('express');
+const compression = require('compression');
+const fs = require('node:fs');
+const path = require('node:path');
 const Parser = require('rss-parser');
 const config = require('./config');
 const Database = require('./db');
 const FeedService = require('./feed-service');
 const ReadLaterService = require('./read-later-service');
+const ReadLaterJobQueue = require('./read-later-jobs');
+const { sanitizeHtml } = require('./html-sanitizer');
 const { renderAdminPage, renderFaviconSvg } = require('./admin-page');
 const { parseOpml } = require('./opml');
 const { scheduleRefreshes } = require('./refresh-scheduler');
 const {
   buildFeedNameFromUrl: buildFeedNameFromUrlUtil,
+  hashText,
   isManagedFeedSourceUrl,
   normalizeFolderPath,
 } = require('./utils');
 
+if (require.main === module) {
+  process.umask(0o077);
+}
+
 const db = new Database(config.dbPath);
 const feedService = new FeedService({ db, config });
 const readLaterService = new ReadLaterService({ db, config, feedService });
+const readLaterJobs = new ReadLaterJobQueue({
+  db,
+  readLaterService,
+  concurrency: config.readLaterJobConcurrency,
+});
 const parser = new Parser({
   customFields: {
     item: ['content:encoded', 'creator'],
@@ -24,12 +39,14 @@ const parser = new Parser({
 });
 
 const app = express();
+app.disable('x-powered-by');
+app.use(compression());
+app.use(mutationGuard);
 app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: false }));
+const readLaterRateLimit = createFixedWindowRateLimit(config.readLaterRateLimitPerMinute);
 
 app.get('/', (request, response) => {
-  feedService.ensureBootstrapFeed();
-  const baseUrl = config.appBaseUrl || `${request.protocol}://${request.get('host')}`;
+  const baseUrl = feedService.baseUrl(request);
   response.json({
     service: 'NewRSS MVP',
     mode: 'reader-view',
@@ -38,6 +55,8 @@ app.get('/', (request, response) => {
       refreshAll: '/refresh',
       feeds: '/api/feeds',
       readLater: '/api/read-later',
+      readLaterJobs: '/api/read-later/jobs',
+      readLaterItems: '/api/read-later/items',
       opml: '/opml.xml',
       admin: '/admin',
       feed: `/feeds/${encodeURIComponent(config.defaultFeedName)}.xml`,
@@ -54,6 +73,16 @@ app.get('/healthz', (request, response) => {
   });
 });
 
+app.get('/readyz', (request, response) => {
+  try {
+    db.db.prepare('SELECT 1 AS ready').get();
+    fs.accessSync(path.dirname(config.dbPath), fs.constants.R_OK | fs.constants.W_OK);
+    response.json({ ok: true, ready: true });
+  } catch {
+    response.status(503).json({ ok: false, ready: false });
+  }
+});
+
 app.get('/favicon.svg', (request, response) => {
   response
     .set('Cache-Control', 'public, max-age=86400')
@@ -65,12 +94,19 @@ app.get('/favicon.ico', (request, response) => {
   response.redirect(302, '/favicon.svg?v=1');
 });
 
-app.get('/refresh', async (request, response) => {
+app.get('/refresh', (request, response) => {
+  response.status(405).set('Allow', 'POST').json({
+    ok: false,
+    error: 'refresh must be requested with POST',
+  });
+});
+
+app.post('/refresh', async (request, response) => {
   try {
     let result;
-    if (request.query.name) {
-      const feedName = String(request.query.name);
-      const sourceUrl = request.query.url ? String(request.query.url) : null;
+    if (request.body?.name) {
+      const feedName = String(request.body.name);
+      const sourceUrl = request.body.url ? normalizeHttpUrl(request.body.url, 'url') : null;
       result = sourceUrl
         ? await feedService.refreshFeed({ parser, feedName, sourceUrl })
         : await feedService.refreshStoredFeed({ parser, feedName });
@@ -83,15 +119,14 @@ app.get('/refresh', async (request, response) => {
       result,
     });
   } catch (error) {
-    response.status(error.code === 'REFRESH_IN_PROGRESS' ? 409 : 500).json({
+    response.status(httpStatusForError(error)).json({
       ok: false,
-      error: error.message,
+      error: publicApiError(error),
     });
   }
 });
 
 app.get('/api/feeds', (request, response) => {
-  feedService.ensureBootstrapFeed();
   response.json({
     ok: true,
     feeds: listAdminFeeds(request),
@@ -108,14 +143,14 @@ app.post('/api/feeds', (request, response) => {
       feed: mapFeedForResponse(saved, request),
     });
   } catch (error) {
-    response.status(400).json({
+    response.status(httpStatusForError(error)).json({
       ok: false,
-      error: error.message,
+      error: publicApiError(error),
     });
   }
 });
 
-app.post('/api/read-later', async (request, response) => {
+app.post('/api/read-later', readLaterRateLimit, async (request, response) => {
   try {
     const payload = normalizeReadLaterPayload(request.body);
     const result = await readLaterService.saveUrl({
@@ -131,10 +166,54 @@ app.post('/api/read-later', async (request, response) => {
       result,
     });
   } catch (error) {
-    response.status(400).json({
+    response.status(httpStatusForError(error)).json({
       ok: false,
-      error: error.message,
+      error: publicApiError(error),
     });
+  }
+});
+
+app.post('/api/read-later/jobs', readLaterRateLimit, (request, response) => {
+  try {
+    const payload = normalizeReadLaterPayload(request.body);
+    const explicitKey = String(request.get('idempotency-key') || '').trim();
+    const idempotencyKey = explicitKey || buildAutomaticIdempotencyKey(payload);
+    const job = readLaterJobs.enqueue({
+      payload,
+      baseUrl: feedService.baseUrl(request),
+      idempotencyKey,
+      retryFailed: !explicitKey,
+    });
+    response.status(202).json(job);
+  } catch (error) {
+    response.status(httpStatusForError(error)).json({ ok: false, error: publicApiError(error) });
+  }
+});
+
+app.get('/api/read-later/jobs/:id', (request, response) => {
+  const job = readLaterJobs.get(request.params.id);
+  if (!job) {
+    response.status(404).json({ ok: false, error: 'read-later job not found' });
+    return;
+  }
+  response.json(job);
+});
+
+app.get('/api/read-later/items', (request, response) => {
+  try {
+    const limit = normalizeQueryInteger(request.query.limit, 50, { min: 1, max: 100 });
+    const offset = normalizeQueryInteger(request.query.offset, 0, { min: 0, max: 10_000_000 });
+    response.json({
+      ok: true,
+      ...readLaterService.listItemsPage({
+        request,
+        limit,
+        offset,
+        search: String(request.query.q || ''),
+      }),
+    });
+  } catch (error) {
+    response.status(httpStatusForError(error)).json({ ok: false, error: publicApiError(error) });
   }
 });
 
@@ -154,9 +233,9 @@ app.delete('/api/read-later/items/:id', (request, response) => {
       deleted,
     });
   } catch (error) {
-    response.status(400).json({
+    response.status(httpStatusForError(error)).json({
       ok: false,
-      error: error.message,
+      error: publicApiError(error),
     });
   }
 });
@@ -174,6 +253,9 @@ app.post('/api/opml/import', (request, response) => {
     if (!outlines.length) {
       throw new Error('OPML contains no feeds');
     }
+    if (outlines.length > 2000) {
+      throw validationError('OPML contains too many feeds (maximum 2000)');
+    }
 
     const result = feedService.importFeeds(outlines, folderOverride);
     if (!result.total) {
@@ -185,29 +267,33 @@ app.post('/api/opml/import', (request, response) => {
       result,
     });
   } catch (error) {
-    response.status(400).json({
+    response.status(httpStatusForError(error)).json({
       ok: false,
-      error: error.message,
+      error: publicApiError(error),
     });
   }
 });
 
 app.delete('/api/feeds/:name', (request, response) => {
-  const name = request.params.name;
-  const deleted = feedService.deleteFeed(name);
+  try {
+    const name = request.params.name;
+    const deleted = feedService.deleteFeed(name);
 
-  if (!deleted.changes) {
-    response.status(404).json({
-      ok: false,
-      error: 'feed not found',
+    if (!deleted.changes) {
+      response.status(404).json({
+        ok: false,
+        error: 'feed not found',
+      });
+      return;
+    }
+
+    response.json({
+      ok: true,
+      deleted: name,
     });
-    return;
+  } catch (error) {
+    response.status(httpStatusForError(error)).json({ ok: false, error: publicApiError(error) });
   }
-
-  response.json({
-    ok: true,
-    deleted: name,
-  });
 });
 
 app.post('/api/feeds/:name/refresh', async (request, response) => {
@@ -222,15 +308,15 @@ app.post('/api/feeds/:name/refresh', async (request, response) => {
       result,
     });
   } catch (error) {
-    response.status(error.message.includes('not found') ? 404 : error.code === 'REFRESH_IN_PROGRESS' ? 409 : 500).json({
+    response.status(httpStatusForError(error)).json({
       ok: false,
-      error: error.message,
+      error: publicApiError(error),
     });
   }
 });
 
 app.get('/api/codex/status', (request, response) => {
-  const status = feedService.getCodexStatus();
+  const status = activeCodexService()?.getCodexStatus();
   if (!status) {
     response.status(404).json({ ok: false, error: 'Codex OAuth is not the active translation provider' });
     return;
@@ -240,28 +326,33 @@ app.get('/api/codex/status', (request, response) => {
 
 app.post('/api/codex/probe', async (request, response) => {
   try {
-    const result = await feedService.probeCodex({ force: true });
+    const service = activeCodexService();
+    if (!service) {
+      response.status(404).json({ ok: false, error: 'Codex OAuth is not an active translation provider' });
+      return;
+    }
+    const result = await service.probeCodex({ force: true });
     response.status(result.ok === false ? 503 : 200).json({ ok: result.ok !== false, result });
   } catch (error) {
-    response.status(400).json({ ok: false, error: error.message });
+    response.status(httpStatusForError(error)).json({ ok: false, error: publicApiError(error) });
   }
 });
 
 app.get('/admin', (request, response) => {
-  feedService.ensureBootstrapFeed();
   const feeds = listAdminFeeds(request);
-  response.type('text/html; charset=utf-8').send(
+  response
+    .set('Content-Security-Policy', "frame-ancestors 'none'; base-uri 'none'; object-src 'none'")
+    .type('text/html; charset=utf-8').send(
     renderAdminPage({
       feeds,
       folders: Array.from(new Set(feeds.map((feed) => feed.folder).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
-      baseUrl: config.appBaseUrl || `${request.protocol}://${request.get('host')}`,
+      baseUrl: feedService.baseUrl(request),
       readLaterFeedName: config.readLaterFeedName,
     })
   );
 });
 
 app.get('/opml.xml', (request, response) => {
-  feedService.ensureBootstrapFeed();
   response
     .type('text/x-opml; charset=utf-8')
     .send(feedService.renderOpml({ request, folder: request.query.folder || '' }));
@@ -278,11 +369,23 @@ app.get('/feeds/:name.xml', (request, response) => {
     return;
   }
 
-  response.type('application/rss+xml; charset=utf-8').send(xml);
+  const feed = db.getFeedByName(request.params.name);
+  const etag = `"${hashText(xml)}"`;
+  response
+    .set('Cache-Control', 'public, max-age=300, must-revalidate')
+    .set('Last-Modified', new Date(feed?.content_updated_at || feed?.created_at || 0).toUTCString())
+    .set('ETag', etag)
+    .type('application/rss+xml; charset=utf-8');
+  if (etagMatches(request.get('if-none-match'), etag)) {
+    response.status(304).end();
+    return;
+  }
+  response.send(xml);
 });
 
 app.get('/articles/:id', (request, response) => {
-  const entry = db.getEntryById(Number.parseInt(request.params.id, 10));
+  const entryId = parsePositiveSafeInteger(request.params.id);
+  const entry = entryId ? db.getEntryById(entryId) : null;
 
   if (!entry) {
     response.status(404).type('text/plain').send('article not found');
@@ -290,15 +393,26 @@ app.get('/articles/:id', (request, response) => {
   }
 
   const title = entry.translated_title || entry.source_title || 'Untitled';
-  const contentHtml =
+  const contentHtml = sanitizeHtml(
     entry.translated_content_html ||
     entry.extracted_content_html ||
     entry.source_content_html ||
-    '<p>No content available.</p>';
+    '<p>No content available.</p>',
+    { baseUrl: safeHttpUrl(entry.source_url) }
+  );
   const contentSource = entry.translation_provider || 'source-feed';
+  const language = entry.translated_content_html ? 'zh-CN' : 'en';
+  const sourceLink = safeHttpUrl(entry.source_url);
 
-  response.type('text/html; charset=utf-8').send(`<!doctype html>
-<html lang="en" translate="yes">
+  response
+    .set({
+      'Content-Language': language,
+      'Content-Security-Policy': "default-src 'none'; img-src http: https:; media-src http: https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-src 'none'; object-src 'none'",
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+    })
+    .type('text/html; charset=utf-8').send(`<!doctype html>
+<html lang="${language}" translate="yes">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -447,7 +561,7 @@ app.get('/articles/:id', (request, response) => {
         <div class="eyebrow">Reader View</div>
         <h1>${escapeHtml(title)}</h1>
         <div class="meta">
-          <div class="meta-row"><span class="meta-label">原文</span><a href="${escapeAttribute(entry.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(entry.source_url)}</a></div>
+          <div class="meta-row"><span class="meta-label">原文</span>${sourceLink ? `<a href="${escapeAttribute(sourceLink)}" target="_blank" rel="noopener noreferrer">${escapeHtml(entry.source_url)}</a>` : `<span>${escapeHtml(entry.source_url)}</span>`}</div>
           <div class="meta-row"><span class="meta-label">来源</span><span>${escapeHtml(contentSource)}</span></div>
           <div class="meta-row"><span class="meta-label">状态</span><span>${escapeHtml(entry.refresh_status)}</span></div>
         </div>
@@ -460,15 +574,73 @@ app.get('/articles/:id', (request, response) => {
 </html>`);
 });
 
+app.use((error, request, response, next) => {
+  if (response.headersSent) {
+    next(error);
+    return;
+  }
+  const status = error?.type === 'entity.too.large' ? 413 : httpStatusForError(error);
+  response.status(status).json({
+    ok: false,
+    error: error?.type === 'entity.too.large' ? 'request body is too large' : publicApiError(error),
+  });
+});
+
 const scheduleDefaultRefresh = () => {
   feedService.ensureBootstrapFeed();
-  scheduleRefreshes({ feedService, parser, config });
+  readLaterJobs.start();
+  return scheduleRefreshes({ feedService, readLaterService, parser, config });
 };
 
-app.listen(config.port, config.host, () => {
-  console.log(`NewRSS listening on http://${config.host}:${config.port}`);
-  scheduleDefaultRefresh();
-});
+let server = null;
+let scheduler = null;
+let shutdownPromise = null;
+
+function startServer() {
+  if (server) {
+    return server;
+  }
+  server = app.listen(config.port, config.host, () => {
+    console.log(`NewRSS listening on http://${config.host}:${config.port}`);
+    scheduler = scheduleDefaultRefresh();
+  });
+  return server;
+}
+
+function shutdown(signal) {
+  if (shutdownPromise) {
+    return shutdownPromise;
+  }
+  if (!server) {
+    return Promise.resolve();
+  }
+  console.log(`[shutdown] received ${signal}`);
+  const activeServer = server;
+  const serverClosed = new Promise((resolve, reject) => {
+    activeServer.close((error) => error ? reject(error) : resolve());
+  });
+  shutdownPromise = Promise.all([
+    serverClosed,
+    readLaterJobs.stop(),
+    scheduler?.stop?.() || Promise.resolve(),
+  ])
+    .then(() => {
+      db.db.close();
+      server = null;
+    });
+  return shutdownPromise;
+}
+
+if (require.main === module) {
+  startServer();
+  process.once('SIGTERM', () => void shutdown('SIGTERM').catch(reportShutdownError));
+  process.once('SIGINT', () => void shutdown('SIGINT').catch(reportShutdownError));
+}
+
+function reportShutdownError(error) {
+  console.error(`[shutdown] failed: ${error.stack || error.message}`);
+  process.exitCode = 1;
+}
 
 function escapeHtml(value) {
   return String(value)
@@ -493,10 +665,16 @@ function normalizeFeedPayload(body) {
   try {
     parsedUrl = new URL(sourceUrl);
   } catch {
-    throw new Error('sourceUrl must be a valid URL');
+    throw validationError('sourceUrl must be a valid HTTP(S) URL');
   }
+  if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password) {
+    throw validationError('sourceUrl must be an HTTP(S) URL without credentials');
+  }
+  parsedUrl.hash = '';
 
-  const folder = normalizeFolderPath(body.folder || '');
+  const folder = Object.prototype.hasOwnProperty.call(body, 'folder')
+    ? normalizeFolderPath(body.folder || '')
+    : undefined;
   const explicitName = String(body.name || '').trim();
   const name = explicitName || buildFeedNameFromUrl(parsedUrl);
   const title = Object.prototype.hasOwnProperty.call(body, 'title')
@@ -513,6 +691,7 @@ function normalizeFeedPayload(body) {
     folder,
     title,
     translateEnabled: readOptionalFeedTranslate(body),
+    autoName: !explicitName,
   };
 }
 
@@ -543,7 +722,7 @@ function listAdminFeeds(request) {
 }
 
 function mapFeedForResponse(feed, request) {
-  const baseUrl = config.appBaseUrl || `${request.protocol}://${request.get('host')}`;
+  const baseUrl = feedService.baseUrl(request);
 
   return {
     name: feed.name,
@@ -569,14 +748,8 @@ function normalizeReadLaterPayload(body) {
     throw new Error('url is required');
   }
 
-  try {
-    new URL(url);
-  } catch {
-    throw new Error('url must be a valid URL');
-  }
-
   return {
-    url,
+    url: normalizeHttpUrl(url, 'url'),
     title: String(body.title || '').trim(),
     mode: String(body.mode || 'auto').trim(),
     translate: normalizeReadLaterTranslate(body.translate),
@@ -628,3 +801,169 @@ function normalizeReadLaterTranslate(value) {
 
   throw new Error('translate must be a boolean');
 }
+
+function mutationGuard(request, response, next) {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+    next();
+    return;
+  }
+  if (['POST', 'PUT', 'PATCH'].includes(request.method) && !request.is('application/json')) {
+    response.status(415).json({ ok: false, error: 'mutation requests must use application/json' });
+    return;
+  }
+  const origin = String(request.get('origin') || '').trim();
+  if (origin.startsWith('chrome-extension://')) {
+    next();
+    return;
+  }
+  if (String(request.get('sec-fetch-site') || '').toLowerCase() === 'cross-site') {
+    response.status(403).json({ ok: false, error: 'cross-site mutation requests are not allowed' });
+    return;
+  }
+  if (!origin) {
+    next();
+    return;
+  }
+  try {
+    if (new URL(origin).origin !== new URL(feedService.baseUrl(request)).origin) {
+      response.status(403).json({ ok: false, error: 'cross-origin mutation requests are not allowed' });
+      return;
+    }
+  } catch (error) {
+    response.status(httpStatusForError(error)).json({ ok: false, error: publicApiError(error) });
+    return;
+  }
+  next();
+}
+
+function createFixedWindowRateLimit(limit) {
+  const buckets = new Map();
+  const normalizedLimit = Math.max(1, Number(limit) || 20);
+  return (request, response, next) => {
+    const now = Date.now();
+    const key = request.ip || request.socket.remoteAddress || 'unknown';
+    let bucket = buckets.get(key);
+    if (!bucket || now >= bucket.resetAt) {
+      bucket = { count: 0, resetAt: now + 60_000 };
+      buckets.set(key, bucket);
+    }
+    bucket.count += 1;
+    if (bucket.count > normalizedLimit) {
+      response
+        .status(429)
+        .set('Retry-After', String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))))
+        .json({ ok: false, error: 'too many read-later requests' });
+      return;
+    }
+    if (buckets.size > 1000) {
+      for (const [bucketKey, value] of buckets) {
+        if (now >= value.resetAt) buckets.delete(bucketKey);
+      }
+    }
+    next();
+  };
+}
+
+function normalizeHttpUrl(value, label) {
+  let parsed;
+  try {
+    parsed = new URL(String(value || '').trim());
+  } catch {
+    throw validationError(`${label} must be a valid HTTP(S) URL`);
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw validationError(`${label} must be an HTTP(S) URL without credentials`);
+  }
+  parsed.hash = '';
+  return parsed.toString();
+}
+
+function normalizeQueryInteger(value, fallback, { min, max }) {
+  if (value == null || value === '') return fallback;
+  const text = String(value);
+  if (!/^\d+$/.test(text)) throw validationError('pagination values must be integers');
+  const parsed = Number(text);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw validationError(`pagination values must be between ${min} and ${max}`);
+  }
+  return parsed;
+}
+
+function parsePositiveSafeInteger(value) {
+  const text = String(value || '');
+  if (!/^[1-9]\d*$/.test(text)) return null;
+  const parsed = Number(text);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function safeHttpUrl(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password
+      ? parsed.toString()
+      : '';
+  } catch {
+    return '';
+  }
+}
+
+function etagMatches(headerValue, etag) {
+  return String(headerValue || '')
+    .split(',')
+    .map((value) => value.trim().replace(/^W\//, ''))
+    .some((value) => value === '*' || value === etag);
+}
+
+function buildAutomaticIdempotencyKey(payload) {
+  const bucket = Math.floor(Date.now() / (5 * 60 * 1000));
+  return `auto:${hashText(`${JSON.stringify(payload)}:${bucket}`)}`;
+}
+
+function activeCodexService() {
+  if (feedService.isCodexProvider()) return feedService;
+  if (readLaterService.isCodexProvider()) return readLaterService;
+  return null;
+}
+
+function validationError(message) {
+  const error = new Error(message);
+  error.code = 'VALIDATION_ERROR';
+  return error;
+}
+
+function httpStatusForError(error) {
+  const code = String(error?.code || '');
+  if (code === 'REFRESH_IN_PROGRESS' || code === 'FEED_CONFLICT' || code === 'IDEMPOTENCY_CONFLICT') return 409;
+  if (code === 'JOB_QUEUE_STOPPED') return 503;
+  if (code === 'OUTBOUND_TIMEOUT') return 504;
+  if (code.startsWith('OUTBOUND_')) {
+    return [
+      'OUTBOUND_URL_INVALID',
+      'OUTBOUND_URL_PROTOCOL',
+      'OUTBOUND_URL_CREDENTIALS',
+      'OUTBOUND_URL_HOST',
+      'OUTBOUND_ADDRESS_BLOCKED',
+    ].includes(code) ? 400 : 502;
+  }
+  if (code === 'INVALID_HOST' || code === 'VALIDATION_ERROR' || error instanceof SyntaxError) return 400;
+  if (/not found/i.test(String(error?.message || ''))) return 404;
+  if (/\b(required|invalid|must be|must contain|unsupported)\b/i.test(String(error?.message || ''))) return 400;
+  return 500;
+}
+
+function publicApiError(error) {
+  const status = httpStatusForError(error);
+  if (status === 504) return 'upstream request timed out';
+  if (status === 502) return 'upstream request failed';
+  if (status >= 500) return 'internal server error';
+  return String(error?.message || 'request failed').slice(0, 500);
+}
+
+module.exports = {
+  app,
+  db,
+  feedService,
+  readLaterJobs,
+  readLaterService,
+  startServer,
+};

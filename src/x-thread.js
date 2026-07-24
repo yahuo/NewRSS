@@ -1,5 +1,8 @@
 const { fetchTweetDetail } = require('./x-client');
 
+const MAX_THREAD_REQUESTS = 24;
+const MAX_THREAD_TWEETS = 250;
+
 function unwrapTweetResult(result) {
   if (!result) {
     return null;
@@ -29,9 +32,32 @@ function extractTweetEntry(itemContent) {
 
 function parseInstruction(instruction) {
   const entries = [];
-  let moreCursor;
-  let topCursor;
-  let bottomCursor;
+  const moreCursors = [];
+  const topCursors = [];
+  const bottomCursors = [];
+  const addCursor = (cursors, value) => {
+    if (typeof value === 'string' && value && !cursors.includes(value)) {
+      cursors.push(value);
+    }
+  };
+  const collectCursor = (cursorType, itemType, value) => {
+    if (itemType !== 'TimelineTimelineCursor') {
+      return false;
+    }
+    if (cursorType === 'Top') {
+      addCursor(topCursors, value);
+      return true;
+    }
+    if (cursorType === 'Bottom') {
+      addCursor(bottomCursors, value);
+      return true;
+    }
+    if (['ShowMore', 'ShowMoreThreads'].includes(cursorType)) {
+      addCursor(moreCursors, value);
+      return true;
+    }
+    return false;
+  };
 
   const parseItems = (items) => {
     for (const item of items ?? []) {
@@ -40,12 +66,7 @@ function parseInstruction(instruction) {
         continue;
       }
 
-      if (
-        itemContent.cursorType &&
-        ['ShowMore', 'ShowMoreThreads'].includes(itemContent.cursorType) &&
-        itemContent.itemType === 'TimelineTimelineCursor'
-      ) {
-        moreCursor = itemContent.value;
+      if (collectCursor(itemContent.cursorType, itemContent.itemType, itemContent.value)) {
         continue;
       }
 
@@ -66,25 +87,8 @@ function parseInstruction(instruction) {
     }
 
     const { itemContent, items, cursorType, entryType, value } = entity?.content ?? {};
-    if (cursorType === 'Bottom' && entryType === 'TimelineTimelineCursor') {
-      bottomCursor = value;
-    }
-    if (itemContent?.cursorType === 'Bottom' && itemContent?.itemType === 'TimelineTimelineCursor') {
-      bottomCursor = bottomCursor ?? itemContent.value;
-    }
-    if (cursorType === 'Top' && entryType === 'TimelineTimelineCursor') {
-      topCursor = topCursor ?? value;
-    }
-    if (itemContent?.cursorType === 'Top' && itemContent?.itemType === 'TimelineTimelineCursor') {
-      topCursor = topCursor ?? itemContent.value;
-    }
-    if (
-      itemContent?.cursorType &&
-      ['ShowMore', 'ShowMoreThreads'].includes(itemContent.cursorType) &&
-      itemContent.itemType === 'TimelineTimelineCursor'
-    ) {
-      moreCursor = moreCursor ?? itemContent.value;
-    }
+    collectCursor(cursorType, entryType, value);
+    collectCursor(itemContent?.cursorType, itemContent?.itemType, itemContent?.value);
 
     const entry = extractTweetEntry(itemContent);
     if (entry) {
@@ -96,19 +100,56 @@ function parseInstruction(instruction) {
     }
   }
 
-  return { entries, moreCursor, topCursor, bottomCursor };
+  return {
+    entries,
+    moreCursor: moreCursors[0],
+    topCursor: topCursors[0],
+    bottomCursor: bottomCursors[0],
+    moreCursors,
+    topCursors,
+    bottomCursors,
+  };
 }
 
 function parseTweetsAndToken(response) {
-  const instruction =
-    response?.data?.threaded_conversation_with_injections_v2?.instructions?.find(
-      (ins) => ins?.type === 'TimelineAddEntries' || ins?.type === 'TimelineAddToModule'
-    ) ??
-    response?.data?.threaded_conversation_with_injections?.instructions?.find(
-      (ins) => ins?.type === 'TimelineAddEntries' || ins?.type === 'TimelineAddToModule'
-    );
+  const isTimelineInstruction = (instruction) =>
+    instruction?.type === 'TimelineAddEntries' || instruction?.type === 'TimelineAddToModule';
+  const v2Instructions = (
+    response?.data?.threaded_conversation_with_injections_v2?.instructions ?? []
+  ).filter(isTimelineInstruction);
+  const legacyInstructions = (
+    response?.data?.threaded_conversation_with_injections?.instructions ?? []
+  ).filter(isTimelineInstruction);
+  const instructions = v2Instructions.length ? v2Instructions : legacyInstructions;
+  const entries = [];
+  const moreCursors = [];
+  const topCursors = [];
+  const bottomCursors = [];
+  const mergeCursors = (target, values) => {
+    for (const value of values) {
+      if (!target.includes(value)) {
+        target.push(value);
+      }
+    }
+  };
 
-  return parseInstruction(instruction);
+  for (const instruction of instructions) {
+    const parsed = parseInstruction(instruction);
+    entries.push(...parsed.entries);
+    mergeCursors(moreCursors, parsed.moreCursors);
+    mergeCursors(topCursors, parsed.topCursors);
+    mergeCursors(bottomCursors, parsed.bottomCursors);
+  }
+
+  return {
+    entries,
+    moreCursor: moreCursors[0],
+    topCursor: topCursors[0],
+    bottomCursor: bottomCursors[0],
+    moreCursors,
+    topCursors,
+    bottomCursors,
+  };
 }
 
 function toTimestamp(value) {
@@ -120,22 +161,20 @@ function toTimestamp(value) {
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
-async function fetchTweetThread(tweetId, cookieMap, config) {
-  const responses = [];
-  const res = await fetchTweetDetail(tweetId, cookieMap, config);
-  responses.push(res);
-
-  let { entries, moreCursor, topCursor, bottomCursor } = parseTweetsAndToken(res);
-  if (!entries.length) {
-    const errorMessage = res?.errors?.[0]?.message;
+async function fetchTweetThread(tweetId, cookieMap, config, dependencies = {}) {
+  const fetchDetail = dependencies.fetchTweetDetailFn ?? fetchTweetDetail;
+  const initialResponse = await fetchDetail(tweetId, cookieMap, config);
+  const initial = parseTweetsAndToken(initialResponse);
+  if (!initial.entries.length) {
+    const errorMessage = initialResponse?.errors?.[0]?.message;
     if (errorMessage) {
       throw new Error(errorMessage);
     }
     return null;
   }
 
-  let allEntries = entries.slice();
-  const root = allEntries.find((entry) => entry.tweet?.legacy?.id_str === tweetId);
+  const entryId = (entry) => entry.tweet?.legacy?.id_str ?? entry.tweet?.rest_id;
+  const root = initial.entries.find((entry) => entryId(entry) === tweetId);
   if (!root) {
     throw new Error('Can not fetch the root tweet');
   }
@@ -155,91 +194,113 @@ async function fetchTweetThread(tweetId, cookieMap, config) {
         !tweet.in_reply_to_user_id_str)
     );
   };
-  const inThread = (items) => items.some(isSameThread);
-
-  let hasThread = inThread(entries);
-  let maxRequestCount = 1000;
-  let topHasThread = true;
-
-  while (topCursor && topHasThread && maxRequestCount > 0) {
-    const next = await fetchTweetDetail(tweetId, cookieMap, config, topCursor);
-    responses.push(next);
-    const parsed = parseTweetsAndToken(next);
-    topHasThread = inThread(parsed.entries);
-    topCursor = parsed.topCursor;
-    allEntries = parsed.entries.concat(allEntries);
-    maxRequestCount -= 1;
-  }
-
-  async function checkMoreTweets(focalId) {
-    while (moreCursor && hasThread && maxRequestCount > 0) {
-      const next = await fetchTweetDetail(focalId, cookieMap, config, moreCursor);
-      responses.push(next);
-      const parsed = parseTweetsAndToken(next);
-      moreCursor = parsed.moreCursor;
-      bottomCursor = bottomCursor ?? parsed.bottomCursor;
-      hasThread = inThread(parsed.entries);
-      allEntries = allEntries.concat(parsed.entries);
-      maxRequestCount -= 1;
-    }
-
-    if (bottomCursor) {
-      const next = await fetchTweetDetail(focalId, cookieMap, config, bottomCursor);
-      responses.push(next);
-      const parsed = parseTweetsAndToken(next);
-      allEntries = allEntries.concat(parsed.entries);
-      bottomCursor = undefined;
-    }
-  }
-
-  await checkMoreTweets(tweetId);
-
-  const allThreadEntries = allEntries.filter(
-    (entry) => entry.tweet?.legacy?.id_str === tweetId || isSameThread(entry)
-  );
-  const lastEntity = allThreadEntries[allThreadEntries.length - 1];
-  if (lastEntity?.tweet?.legacy?.id_str) {
-    const lastRes = await fetchTweetDetail(lastEntity.tweet.legacy.id_str, cookieMap, config);
-    responses.push(lastRes);
-    const parsed = parseTweetsAndToken(lastRes);
-    hasThread = inThread(parsed.entries);
-    allEntries = allEntries.concat(parsed.entries);
-    moreCursor = parsed.moreCursor;
-    bottomCursor = parsed.bottomCursor;
-    maxRequestCount -= 1;
-    await checkMoreTweets(lastEntity.tweet.legacy.id_str);
-  }
-
-  const distinctEntries = [];
+  const isConversationEntry = (entry) => {
+    const tweet = entry.tweet?.legacy;
+    return (
+      tweet?.user_id_str === rootEntry.user_id_str &&
+      tweet?.conversation_id_str === rootEntry.conversation_id_str
+    );
+  };
   const entryMap = new Map();
-  for (const entry of allEntries) {
-    const id = entry.tweet?.legacy?.id_str ?? entry.tweet?.rest_id;
-    if (id && !entryMap.has(id)) {
-      entryMap.set(id, entry);
-      distinctEntries.push(entry);
+  const addEntries = (entries) => {
+    for (const entry of entries) {
+      if (entryMap.size >= MAX_THREAD_TWEETS) {
+        return;
+      }
+      const id = entryId(entry);
+      if (id && isConversationEntry(entry) && !entryMap.has(id)) {
+        entryMap.set(id, entry);
+      }
+    }
+  };
+  addEntries([root, ...initial.entries]);
+
+  const cursorQueue = [];
+  const queuedCursors = new Set();
+  const seenCursors = new Set();
+  let queueIndex = 0;
+  let requestCount = 1;
+
+  const enqueueCursors = (parsed, focalId) => {
+    for (const cursor of [
+      ...parsed.topCursors,
+      ...parsed.moreCursors,
+      ...parsed.bottomCursors,
+    ]) {
+      if (!seenCursors.has(cursor) && !queuedCursors.has(cursor)) {
+        queuedCursors.add(cursor);
+        cursorQueue.push({ cursor, focalId });
+      }
+    }
+  };
+
+  const processCursorQueue = async () => {
+    while (
+      queueIndex < cursorQueue.length &&
+      requestCount < MAX_THREAD_REQUESTS &&
+      entryMap.size < MAX_THREAD_TWEETS
+    ) {
+      const { cursor, focalId } = cursorQueue[queueIndex];
+      queueIndex += 1;
+      queuedCursors.delete(cursor);
+      if (seenCursors.has(cursor)) {
+        continue;
+      }
+      seenCursors.add(cursor);
+
+      const response = await fetchDetail(focalId, cookieMap, config, cursor);
+      requestCount += 1;
+      const parsed = parseTweetsAndToken(response);
+      const pageHasThread = parsed.entries.some(isSameThread);
+      addEntries(parsed.entries);
+      if (pageHasThread) {
+        enqueueCursors(parsed, focalId);
+      }
+    }
+  };
+
+  enqueueCursors(initial, tweetId);
+  await processCursorQueue();
+
+  if (requestCount < MAX_THREAD_REQUESTS && entryMap.size < MAX_THREAD_TWEETS) {
+    const latestEntry = Array.from(entryMap.values())
+      .filter((entry) => entryId(entry) === tweetId || isSameThread(entry))
+      .reduce(
+        (latest, entry) =>
+          toTimestamp(entry.tweet?.legacy?.created_at) > toTimestamp(latest.tweet?.legacy?.created_at)
+            ? entry
+            : latest,
+        root
+      );
+    const latestId = entryId(latestEntry);
+    if (latestId && latestId !== tweetId) {
+      const response = await fetchDetail(latestId, cookieMap, config);
+      requestCount += 1;
+      const parsed = parseTweetsAndToken(response);
+      addEntries(parsed.entries);
+      if (parsed.entries.some(isSameThread)) {
+        enqueueCursors(parsed, latestId);
+        await processCursorQueue();
+      }
     }
   }
 
   const rootTweet = entryMap.get(tweetId)?.tweet ?? root.tweet;
-  const conversationId = rootTweet?.legacy?.conversation_id_str;
-  const inConversation = distinctEntries.filter((entry) => {
-    const legacy = entry.tweet?.legacy;
-    return legacy?.conversation_id_str === conversationId && legacy?.user_id_str === rootEntry.user_id_str;
-  });
+  const inConversation = Array.from(entryMap.values());
   inConversation.sort(
     (left, right) => toTimestamp(left.tweet?.legacy?.created_at) - toTimestamp(right.tweet?.legacy?.created_at)
   );
 
   return {
     requestedId: tweetId,
-    rootId: rootTweet?.legacy?.id_str ?? tweetId,
+    rootId: rootTweet?.legacy?.id_str ?? rootTweet?.rest_id ?? tweetId,
     tweets: inConversation.map((entry) => entry.tweet),
     totalTweets: inConversation.length,
     user: root.user,
-    responses,
   };
 }
 
 module.exports = {
   fetchTweetThread,
+  parseTweetsAndToken,
 };

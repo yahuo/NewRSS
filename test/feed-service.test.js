@@ -19,6 +19,10 @@ const createService = () => {
     httpTimeoutMs: 5_000,
     maxItemsPerFeed: 50,
     maxItemsPerRefresh: 10,
+    articleRecheckHours: 24,
+    itemRefreshConcurrency: 3,
+    feedRefreshConcurrency: 2,
+    outboundAllowedHosts: ['example.com', 'www.nytimes.com'],
     upstreamProxyUrl: '',
     userAgent: 'NewRSS test',
   };
@@ -69,6 +73,102 @@ test('manual feed display title defaults to its name and survives later updates'
     translateEnabled: false,
   });
   assert.equal(db.getFeedByName('Economist').title, 'The Economist');
+});
+
+test('feed metadata changes advance the RSS revision and invalidate cached XML', (t) => {
+  const { db, directory, service } = createService();
+  t.after(() => {
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const request = { get: () => 'newrss.local:8787', protocol: 'http' };
+  service.saveFeed({
+    name: 'MetadataFeed',
+    sourceUrl: 'https://example.com/feed.xml',
+    title: 'Old title',
+    translateEnabled: false,
+  });
+  const firstXml = service.renderFeedXml({ request, feedName: 'MetadataFeed' });
+  const firstRevision = db.getFeedByName('MetadataFeed').content_revision;
+
+  service.saveFeed({
+    name: 'MetadataFeed',
+    sourceUrl: 'https://example.com/feed.xml',
+    title: 'New title',
+    translateEnabled: true,
+  });
+  const secondXml = service.renderFeedXml({ request, feedName: 'MetadataFeed' });
+  const updated = db.getFeedByName('MetadataFeed');
+
+  assert.ok(updated.content_revision > firstRevision);
+  assert.notEqual(secondXml, firstXml);
+  assert.match(secondXml, /New title/);
+  assert.match(secondXml, /<language><!\[CDATA\[zh-CN\]\]><\/language>/);
+});
+
+test('RSS cache applies a global byte budget and evicts the least recently used feed', (t) => {
+  const { db, directory, service } = createService();
+  t.after(() => {
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const request = { get: () => 'newrss.local:8787', protocol: 'http' };
+  for (const name of ['FirstCacheFeed', 'SecondCacheFeed']) {
+    service.saveFeed({
+      name,
+      sourceUrl: `https://example.com/${name}.xml`,
+      title: name,
+      translateEnabled: false,
+    });
+  }
+
+  const firstXml = service.renderFeedXml({ request, feedName: 'FirstCacheFeed' });
+  service.invalidateFeedXmlCache('FirstCacheFeed');
+  service.config.rssCacheMaxBytes = Buffer.byteLength(firstXml, 'utf8') + 128;
+  service.renderFeedXml({ request, feedName: 'FirstCacheFeed' });
+  service.renderFeedXml({ request, feedName: 'SecondCacheFeed' });
+
+  assert.equal(service.feedXmlCache.size, 1);
+  assert.ok(service.feedXmlCacheBytes <= service.config.rssCacheMaxBytes);
+  assert.match(service.feedXmlCache.keys().next().value, /^SecondCacheFeed\n/);
+});
+
+test('auto-derived feed name collisions get a stable URL hash and missing folder updates preserve the folder', (t) => {
+  const { db, directory, service } = createService();
+  t.after(() => {
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const first = service.saveFeed({
+    name: 'example-com-feed', sourceUrl: 'https://example.com/feed?edition=one', folder: 'News', autoName: true,
+  });
+  const second = service.saveFeed({
+    name: 'example-com-feed', sourceUrl: 'https://example.com/feed?edition=two', folder: 'Other', autoName: true,
+  });
+  assert.equal(first.name, 'example-com-feed');
+  assert.match(second.name, /^example-com-feed-[0-9a-f]{8}$/);
+  assert.notEqual(second.name, first.name);
+
+  service.saveFeed({ name: first.name, sourceUrl: first.source_url, title: 'Updated' });
+  assert.equal(db.getFeedByName(first.name).folder, 'News');
+});
+
+test('generic feed operations cannot overwrite or delete the managed Read Later feed', (t) => {
+  const { db, directory, service } = createService();
+  service.config.readLaterFeedName = 'read-later';
+  t.after(() => {
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  assert.throws(
+    () => service.saveFeed({ name: 'read-later', sourceUrl: 'https://example.com/feed.xml' }),
+    (error) => error.code === 'FEED_CONFLICT'
+  );
+  assert.throws(
+    () => service.deleteFeed('read-later'),
+    (error) => error.code === 'FEED_CONFLICT'
+  );
 });
 
 test('refresh exposes an in-progress status and does not replace the display title', async (t) => {
@@ -128,17 +228,17 @@ test('unexpected refresh failures replace the in-progress status with an error',
     items: [{ guid: 'article-1', link: 'https://www.economist.com/article-1' }],
   });
   db.getEntryByFeedAndGuid = () => {
-    throw new Error('database lookup failed');
+    throw new Error('Unable to read Codex auth file /Users/example/.codex/auth.json');
   };
 
   await assert.rejects(
     service.refreshStoredFeed({ parser: {}, feedName: 'Economist' }),
-    /database lookup failed/
+    /Codex auth file/
   );
 
   const feed = db.getFeedByName('Economist');
   assert.equal(feed.last_refresh_status, 'error');
-  assert.equal(feed.last_refresh_error, 'database lookup failed');
+  assert.equal(feed.last_refresh_error, 'operation failed; see server logs for details');
 });
 
 test('refresh skips New York Times live items before applying the item limit', async (t) => {
@@ -230,6 +330,67 @@ test('scheduled and manual refreshes do not overlap', async (t) => {
   await active;
 });
 
+test('recent unchanged entries reuse extracted content without fetching the article again', async (t) => {
+  const { db, directory, service } = createService();
+  const originalFetch = global.fetch;
+  let fetchCount = 0;
+  global.fetch = async () => {
+    fetchCount += 1;
+    return new Response(`<article><p>${'Complete article content. '.repeat(40)}</p></article>`, { status: 200 });
+  };
+  t.after(() => {
+    global.fetch = originalFetch;
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  service.saveFeed({ name: 'ReuseFeed', sourceUrl: 'https://example.com/feed.xml', translateEnabled: false });
+  service.parseSourceFeed = async () => ({
+    title: 'Reuse', items: [{ guid: 'same', title: 'Same', link: 'https://example.com/same' }],
+  });
+
+  await service.refreshStoredFeed({ parser: {}, feedName: 'ReuseFeed' });
+  const before = db.getEntryByFeedAndGuid('ReuseFeed', stableGuid({ guid: 'same' })).source_fetched_at;
+  const second = await service.refreshStoredFeed({ parser: {}, feedName: 'ReuseFeed' });
+  const after = db.getEntryByFeedAndGuid('ReuseFeed', stableGuid({ guid: 'same' })).source_fetched_at;
+  assert.equal(fetchCount, 1);
+  assert.equal(second.items[0].reused, true);
+  assert.equal(after, before);
+});
+
+test('due translations retry from stored content even after the entry falls outside the upstream slice', async (t) => {
+  const { db, directory, service } = createService();
+  t.after(() => {
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  service.saveFeed({ name: 'DueFeed', sourceUrl: 'https://example.com/feed.xml', translateEnabled: true });
+  const now = new Date().toISOString();
+  db.upsertEntry({
+    feedName: 'DueFeed', sourceGuid: 'old-entry', sourceUrl: 'https://example.com/old',
+    sourceTitle: 'Old English title', sourceContentHtml: '<p>Old English article content.</p>',
+    extractedContentHtml: null, translationProvider: 'readability', refreshStatus: 'error',
+    refreshError: 'translation timeout', refreshedAt: now, createdAt: now, updatedAt: now,
+  });
+  db.db.prepare(`
+    UPDATE entries
+    SET translation_retry_after = ?, translation_failure_count = 1
+    WHERE feed_name = ? AND source_guid = ?
+  `).run('2020-01-01T00:00:00.000Z', 'DueFeed', 'old-entry');
+  service.parseSourceFeed = async () => ({ title: 'DueFeed', items: [] });
+  service.translationService.shouldTranslate = () => true;
+  let calls = 0;
+  service.translationService.translateArticle = async () => {
+    calls += 1;
+    return { translatedTitle: '旧文章', translatedContentHtml: '<p>旧文章译文</p>', provider: 'test' };
+  };
+
+  await service.refreshAllFeeds({ parser: {} });
+  const entry = db.getEntryByFeedAndGuid('DueFeed', 'old-entry');
+  assert.equal(calls, 1);
+  assert.equal(entry.translated_content_html, '<p>旧文章译文</p>');
+  assert.equal(entry.translation_retry_after, null);
+});
+
 test('translation backoff persists across service restart and content changes clear it', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'newrss-feed-backoff-'));
   const dbPath = path.join(directory, 'newrss.db');
@@ -245,6 +406,8 @@ test('translation backoff persists across service restart and content changes cl
   const config = {
     appBaseUrl: '', defaultFeedName: '', defaultFeedUrl: '', httpTimeoutMs: 5_000,
     maxItemsPerFeed: 50, maxItemsPerRefresh: 10, upstreamProxyUrl: '', userAgent: 'NewRSS test',
+    articleRecheckHours: 24, itemRefreshConcurrency: 3, feedRefreshConcurrency: 2,
+    outboundAllowedHosts: ['example.com'],
   };
   const item = { guid: 'article-1', title: 'English article title', link: 'https://example.com/article' };
   const sourceGuid = stableGuid(item);
@@ -279,6 +442,9 @@ test('translation backoff persists across service restart and content changes cl
   assert.equal(db.getEntryByFeedAndGuid('BackoffFeed', sourceGuid).translation_failure_count, 1);
 
   articleBody = 'Changed English article body. '.repeat(50);
+  db.db.prepare(`UPDATE entries SET source_fetched_at = ? WHERE feed_name = ? AND source_guid = ?`).run(
+    '2020-01-01T00:00:00.000Z', 'BackoffFeed', sourceGuid
+  );
   const third = await service.refreshStoredFeed({ parser: {}, feedName: 'BackoffFeed' });
   assert.equal(third.items[0].status, 'ok');
   assert.equal(translationCalls, 1);
@@ -310,13 +476,17 @@ test('expired translation backoff retries instead of reusing an older translatio
   await service.refreshStoredFeed({ parser: {}, feedName: 'RetryFeed' });
 
   articleBody = 'Changed English article body. '.repeat(50);
+  db.db.prepare(`UPDATE entries SET source_fetched_at = ? WHERE feed_name = ? AND source_guid = ?`).run(
+    '2020-01-01T00:00:00.000Z', 'RetryFeed', sourceGuid
+  );
   service.translationService.translateArticle = async () => { throw new Error('translation timeout'); };
   await service.refreshStoredFeed({ parser: {}, feedName: 'RetryFeed' });
   const duringResult = await service.refreshStoredFeed({ parser: {}, feedName: 'RetryFeed' });
   const during = db.getEntryByFeedAndGuid('RetryFeed', sourceGuid);
   assert.equal(duringResult.items[0].status, 'backoff');
-  assert.equal(during.translated_content_html, '<p>旧译文</p>');
-  assert.equal(during.translated_title, '旧标题');
+  assert.equal(during.translated_content_html, null);
+  assert.equal(during.translated_title, null);
+  assert.match(during.extracted_content_html, /Changed English article body/);
   db.db.prepare(`UPDATE entries SET translation_retry_after = ? WHERE feed_name = ? AND source_guid = ?`).run(
     new Date(Date.now() - 1000).toISOString(), 'RetryFeed', sourceGuid
   );

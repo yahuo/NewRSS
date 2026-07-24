@@ -8,18 +8,24 @@
     "dev": "node --watch --disable-warning=ExperimentalWarning src/server.js",
     "backup:database": "node --disable-warning=ExperimentalWarning scripts/backup-database.js",
     "export:entry": "node --disable-warning=ExperimentalWarning scripts/export-entry.js",
-    "test": "node --test"
+    "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=70 --test-coverage-functions=70 --test-coverage-branches=70"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "type": "commonjs",
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
+    "compression": "^1.8.1",
     "express": "^5.2.1",
-    "jsdom": "^29.0.0",
-    "markdown-it": "^14.1.1",
+    "jsdom": "^29.1.1",
+    "markdown-it": "^14.3.0",
     "rss": "^1.2.2",
-    "rss-parser": "^3.13.0"
+    "rss-parser": "^3.13.0",
+    "undici": "^7.28.0"
   }
 }

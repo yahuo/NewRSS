@@ -8,6 +8,7 @@ const {
   getArticleStrategy,
 } = require('../src/article-strategies');
 const { resolveArticleContent } = require('../src/extractor');
+const TEST_ALLOWED_HOSTS = ['www.newyorker.com', 'foreignpolicy.com', 'www.economist.com', 'www.nytimes.com'];
 
 test('article strategies only match the four supported domains', () => {
   assert.equal(getArticleStrategy('https://www.economist.com/test').name, 'economist');
@@ -96,7 +97,7 @@ test('New Yorker document preparation runs before Readability', async () => {
   try {
     const result = await resolveArticleContent(
       { link: 'https://www.newyorker.com/magazine/test' },
-      { timeoutMs: 5_000, userAgent: 'NewRSS default user agent' }
+      { timeoutMs: 5_000, userAgent: 'NewRSS default user agent', allowedHosts: TEST_ALLOWED_HOSTS }
     );
 
     assert.match(result.html, /Primary body sentence/);
@@ -125,7 +126,7 @@ test('Foreign Policy document preparation removes duplicated preview before Read
   try {
     const result = await resolveArticleContent(
       { link: 'https://foreignpolicy.com/2026/07/17/test/' },
-      { timeoutMs: 5_000, userAgent: 'NewRSS default user agent' }
+      { timeoutMs: 5_000, userAgent: 'NewRSS default user agent', allowedHosts: TEST_ALLOWED_HOSTS }
     );
 
     assert.doesNotMatch(result.html, /Repeated preview sentence/);
@@ -139,7 +140,7 @@ test('Economist strategy bypasses a long RSS teaser and uses its request user ag
   const originalFetch = global.fetch;
   let requestHeaders;
   global.fetch = async (_url, options) => {
-    requestHeaders = options.headers;
+    requestHeaders = new Headers(options.headers);
     return new Response(`
       <!doctype html>
       <html>
@@ -164,11 +165,12 @@ test('Economist strategy bypasses a long RSS teaser and uses its request user ag
       {
         timeoutMs: 5_000,
         userAgent: 'NewRSS default user agent',
+        allowedHosts: TEST_ALLOWED_HOSTS,
       }
     );
 
     assert.equal(result.source, 'readability');
-    assert.equal(requestHeaders['user-agent'], ECONOMIST_USER_AGENT);
+    assert.equal(requestHeaders.get('user-agent'), ECONOMIST_USER_AGENT);
     assert.match(result.html, /Second fetched paragraph/);
   } finally {
     global.fetch = originalFetch;
@@ -179,7 +181,7 @@ test('New York Times strategy fetches the page with its request user agent and r
   const originalFetch = global.fetch;
   let requestHeaders;
   global.fetch = async (_url, options) => {
-    requestHeaders = options.headers;
+    requestHeaders = new Headers(options.headers);
     return new Response(`
       <!doctype html>
       <html>
@@ -205,11 +207,12 @@ test('New York Times strategy fetches the page with its request user agent and r
       {
         timeoutMs: 5_000,
         userAgent: 'NewRSS default user agent',
+        allowedHosts: TEST_ALLOWED_HOSTS,
       }
     );
 
     assert.equal(result.source, 'readability');
-    assert.equal(requestHeaders['user-agent'], NYTIMES_USER_AGENT);
+    assert.equal(requestHeaders.get('user-agent'), NYTIMES_USER_AGENT);
     assert.match(result.html, /Second fetched paragraph/);
     assert.doesNotMatch(result.html, /Advertisement that should be removed/);
   } finally {

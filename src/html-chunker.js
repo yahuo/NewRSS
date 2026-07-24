@@ -70,7 +70,15 @@ function splitMeaningfulNode(node, maxWords) {
     return [];
   }
 
+  if (node.nodeType === 3) {
+    return splitText(node.textContent, maxWords).map(escapeHtml);
+  }
+
   if (node.nodeType !== 1) {
+    return [serialized];
+  }
+
+  if (node.matches('pre, code')) {
     return [serialized];
   }
 
@@ -80,12 +88,30 @@ function splitMeaningfulNode(node, maxWords) {
   }
 
   const childFragments = listMeaningfulFragments(node.childNodes, maxWords);
-  if (childFragments.length <= 1) {
-    return [serialized];
+  if (!childFragments.length) {
+    return [];
   }
 
   const wrapper = createWrapper([node.cloneNode(false)]);
   return groupFragments(childFragments, maxWords).map((chunk) => wrapper(chunk)).filter(Boolean);
+}
+
+function splitText(value, maxWords) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return [];
+  }
+
+  const words = text.match(/\S+/g) || [];
+  if (words.length <= maxWords) {
+    return [text];
+  }
+
+  const chunks = [];
+  for (let index = 0; index < words.length; index += maxWords) {
+    chunks.push(words.slice(index, index + maxWords).join(' '));
+  }
+  return chunks;
 }
 
 function serializeNode(node) {

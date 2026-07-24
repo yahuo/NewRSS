@@ -2,7 +2,8 @@ const { JSDOM, VirtualConsole } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
 const { resolveArticleCookieHeader } = require('./article-cookies');
 const { getArticleStrategy } = require('./article-strategies');
-const { withProxy } = require('./http-client');
+const { sanitizeHtml } = require('./html-sanitizer');
+const { fetchText } = require('./outbound-http');
 const { stripHtml } = require('./utils');
 
 const MIN_CONTENT_TEXT_LENGTH = 280;
@@ -40,7 +41,7 @@ const extractEmbeddedContent = (item) => {
 
   if (textLength >= MIN_CONTENT_TEXT_LENGTH && !looksLikeTruncatedContent(embedded, text)) {
     return {
-      html: embedded,
+      html: sanitizeHtml(embedded, { baseUrl: item.link || '' }),
       textLength,
       source: 'rss',
     };
@@ -239,8 +240,6 @@ const looksLikeFailureShell = (html) => {
 };
 
 const fetchHtml = async (url, options, strategy) => {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
   const cookieHeader = resolveArticleCookieHeader(url, options);
   const headers = {
     'user-agent': strategy?.userAgent || options.userAgent,
@@ -252,22 +251,14 @@ const fetchHtml = async (url, options, strategy) => {
     headers.cookie = cookieHeader;
   }
 
-  try {
-    const response = await fetch(url, {
-      headers,
-      redirect: 'follow',
-      signal: controller.signal,
-      ...withProxy(options.upstreamProxyUrl),
-    });
-
-    if (!response.ok) {
-      throw new Error(`fetch failed with status ${response.status}`);
-    }
-
-    return await response.text();
-  } finally {
-    clearTimeout(timeout);
-  }
+  return fetchText(url, {
+    headers,
+    timeoutMs: options.timeoutMs,
+    maxBytes: options.maxBytes,
+    maxRedirects: options.maxRedirects,
+    upstreamProxyUrl: options.upstreamProxyUrl,
+    allowedHosts: options.allowedHosts,
+  });
 };
 
 const extractFromPage = async (url, options, strategy) => {
@@ -286,7 +277,10 @@ const extractFromPage = async (url, options, strategy) => {
     throw new Error('readability failed to extract article content');
   }
 
-  const cleanedHtml = ensureLeadMedia(cleanupExtractedHtml(article.content), fallbackLeadImageHtml);
+  const cleanedHtml = sanitizeHtml(
+    ensureLeadMedia(cleanupExtractedHtml(article.content), fallbackLeadImageHtml),
+    { baseUrl: url }
+  );
   if (looksLikeFailureShell(cleanedHtml)) {
     throw new Error('readability extracted a failure shell instead of article content');
   }

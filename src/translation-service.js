@@ -13,6 +13,7 @@ const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120;
 const CODEX_PROVIDER = 'codex-oauth';
 const CODEX_PROBE_DELAYS_MINUTES = [15, 30, 60, 120];
+const codexAuthRefreshes = new Map();
 
 class TranslationService {
   constructor(config, { db = null } = {}) {
@@ -128,13 +129,14 @@ class TranslationService {
     const translatedChunks = await mapWithConcurrency(
       chunks,
       getChunkConcurrency(this.config),
-      (chunk, index) =>
+      (chunk, index, signal) =>
         this.translateMarkdownChunk({
           sourceTitle,
           sourceUrl,
           markdown: chunk.markdown,
           chunkIndex: index,
           chunkCount: chunks.length,
+          signal,
         })
     );
     const translatedMarkdown = translatedChunks.join('\n\n').trim();
@@ -178,9 +180,10 @@ class TranslationService {
     return normalizeDerivedTitle(stripFenceWrapperText(text));
   }
 
-  async translateMarkdownChunk({ sourceTitle, sourceUrl, markdown, chunkIndex, chunkCount }) {
+  async translateMarkdownChunk({ sourceTitle, sourceUrl, markdown, chunkIndex, chunkCount, signal }) {
     const translated = await callTranslationText({
       config: this.config,
+      signal,
       prompt: buildMarkdownChunkPrompt({
         sourceTitle,
         sourceUrl,
@@ -202,13 +205,14 @@ class TranslationService {
     const translatedChunks = await mapWithConcurrency(
       htmlPlan.chunks,
       getChunkConcurrency(this.config),
-      (chunkHtml, index) =>
+      (chunkHtml, index, signal) =>
         this.translateHtmlChunk({
           sourceTitle,
           sourceUrl,
           chunkHtml,
           chunkIndex: index,
           chunkCount: htmlPlan.chunks.length,
+          signal,
         })
     );
 
@@ -228,9 +232,10 @@ class TranslationService {
     };
   }
 
-  async translateHtmlChunk({ sourceTitle, sourceUrl, chunkHtml, chunkIndex, chunkCount }) {
+  async translateHtmlChunk({ sourceTitle, sourceUrl, chunkHtml, chunkIndex, chunkCount, signal }) {
     const translated = await callTranslationText({
       config: this.config,
+      signal,
       prompt: buildHtmlChunkPrompt({
         sourceTitle,
         sourceUrl,
@@ -329,9 +334,9 @@ async function callTranslationJson({ config, prompt }) {
   });
 }
 
-async function callTranslationText({ config, prompt }) {
+async function callTranslationText({ config, prompt, signal }) {
   if (getTranslationProvider(config) === 'codex-oauth') {
-    return callCodexText({ config, prompt });
+    return callCodexText({ config, prompt, signal });
   }
 
   return callGeminiText({
@@ -339,19 +344,21 @@ async function callTranslationText({ config, prompt }) {
     model: config.geminiModel,
     timeoutMs: config.geminiTimeoutMs,
     prompt,
+    signal,
   });
 }
 
-async function fetchGeminiContent({ apiKey, model, timeoutMs, prompt, generationConfig = {} }) {
+async function fetchGeminiContent({ apiKey, model, timeoutMs, prompt, generationConfig = {}, signal }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Number(timeoutMs) || 90_000);
+  const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
 
   try {
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
       {
         method: 'POST',
-        signal: controller.signal,
+        signal: requestSignal,
         headers: {
           'content-type': 'application/json',
           'x-goog-api-key': apiKey,
@@ -423,11 +430,11 @@ async function callGemini({ apiKey, model, timeoutMs, prompt }) {
   return JSON.parse(text);
 }
 
-async function callGeminiText({ apiKey, model, timeoutMs, prompt }) {
-  return fetchGeminiContent({ apiKey, model, timeoutMs, prompt });
+async function callGeminiText({ apiKey, model, timeoutMs, prompt, signal }) {
+  return fetchGeminiContent({ apiKey, model, timeoutMs, prompt, signal });
 }
 
-async function callCodexText({ config, prompt, probe = false }) {
+async function callCodexText({ config, prompt, probe = false, signal }) {
   const store = config.translationStore;
   if (!probe && store) {
     const circuit = store.getTranslationCircuit(CODEX_PROVIDER);
@@ -444,6 +451,7 @@ async function callCodexText({ config, prompt, probe = false }) {
   const timeoutMs = Number(config.codexTimeoutMs) || Number(config.geminiTimeoutMs) || 90_000;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
 
   const requestKind = probe ? 'probe' : 'translation';
   const createdAt = new Date().toISOString();
@@ -470,7 +478,7 @@ async function callCodexText({ config, prompt, probe = false }) {
     };
     const response = await fetch(`${baseUrl}/responses`, {
       method: 'POST',
-      signal: controller.signal,
+      signal: requestSignal,
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${auth.accessToken}`,
@@ -590,6 +598,30 @@ async function resolveCodexAuth(config) {
     return { accessToken, authFile };
   }
 
+  const refreshKey = path.resolve(authFile);
+  const activeRefresh = codexAuthRefreshes.get(refreshKey);
+  if (activeRefresh) {
+    return activeRefresh;
+  }
+
+  const refreshPromise = refreshAndPersistCodexAuth({
+    config,
+    authFile,
+    payload,
+    tokens,
+    refreshToken,
+  });
+  codexAuthRefreshes.set(refreshKey, refreshPromise);
+  try {
+    return await refreshPromise;
+  } finally {
+    if (codexAuthRefreshes.get(refreshKey) === refreshPromise) {
+      codexAuthRefreshes.delete(refreshKey);
+    }
+  }
+}
+
+async function refreshAndPersistCodexAuth({ config, authFile, payload, tokens, refreshToken }) {
   const refreshed = await refreshCodexToken({
     refreshToken,
     timeoutMs: Number(config.codexTimeoutMs) || Number(config.geminiTimeoutMs) || 90_000,
@@ -1032,19 +1064,32 @@ function isAbortLikeError(error) {
 async function mapWithConcurrency(items, concurrency, mapper) {
   const results = new Array(items.length);
   let nextIndex = 0;
+  let firstError = null;
+  const controller = new AbortController();
 
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (true) {
+    while (!firstError) {
       const currentIndex = nextIndex;
       nextIndex += 1;
       if (currentIndex >= items.length) {
         return;
       }
 
-      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+      try {
+        results[currentIndex] = await mapper(items[currentIndex], currentIndex, controller.signal);
+      } catch (error) {
+        if (!firstError) {
+          firstError = error;
+          controller.abort(error);
+        }
+        return;
+      }
     }
   });
 
   await Promise.all(workers);
+  if (firstError) {
+    throw firstError;
+  }
   return results;
 }

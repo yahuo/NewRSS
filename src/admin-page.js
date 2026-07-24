@@ -313,6 +313,15 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         padding: 8px 12px;
         box-shadow: none;
       }
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.58;
+      }
+      .pagination-summary {
+        color: var(--muted);
+        font-size: 0.88rem;
+        align-self: center;
+      }
       .error-box {
         border-radius: 14px;
         padding: 12px 14px;
@@ -365,7 +374,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         <aside class="card">
           <h2>Codex 额度保护</h2>
           <div class="stack">
-            <div class="hint" id="codex-status">正在读取状态…</div>
+            <div class="hint" id="codex-status" role="status" aria-live="polite">正在读取状态…</div>
             <button id="codex-probe" type="button">立即检测 Codex 额度</button>
           </div>
           <hr class="section-divider" />
@@ -394,7 +403,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
             <button class="primary" type="submit">保存源</button>
             <div class="hint">名称为空时，会根据 URL 自动生成一个 slug；显示标题只用于管理页、OPML 和输出 Feed。更新现有源时，显示标题留空会保留当前值。</div>
             <div class="hint">勾选后，后续刷新这个 RSS 源时会自动把英文正文翻译成中文；需要配置 Gemini API key 或 Codex OAuth。</div>
-            <div class="status" id="status"></div>
+            <div class="status" id="status" role="status" aria-live="polite"></div>
           </form>
           <hr class="section-divider" />
           <h2>保存稍后读</h2>
@@ -421,7 +430,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
             </label>
             <button class="primary" type="submit">保存到 Read Later</button>
             <div class="hint">默认会优先用内置的 X 专用链路处理 x.com / twitter.com，失败后再回退到 Readability。取消勾选后只保存原文，不触发服务器翻译。</div>
-            <div class="status" id="read-later-status"></div>
+            <div class="status" id="read-later-status" role="status" aria-live="polite"></div>
           </form>
           <hr class="section-divider" />
           <h2>导出 OPML</h2>
@@ -449,7 +458,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
             </label>
             <button class="primary" type="submit">导入 OPML</button>
             <div class="hint">如果填写目录，导入的所有源都会进入这个目录；如果留空，就按 OPML 自带的目录结构导入。</div>
-            <div class="status" id="opml-status"></div>
+            <div class="status" id="opml-status" role="status" aria-live="polite"></div>
           </form>
         </aside>
 
@@ -479,17 +488,36 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
       const opmlStatus = document.getElementById('opml-status');
       const codexStatus = document.getElementById('codex-status');
       const codexProbe = document.getElementById('codex-probe');
+      const readLaterSubmit = readLaterForm.querySelector('button[type="submit"]');
       const readLaterFeedName = ${JSON.stringify(readLaterFeedName)};
       const appBaseUrl = ${JSON.stringify(baseUrl)};
+      const maxOpmlFileBytes = 2 * 1024 * 1024;
+      const readLaterPage = {
+        items: [],
+        total: 0,
+        limit: 20,
+        offset: 0,
+        query: '',
+        loading: true,
+        error: '',
+        open: false,
+      };
+      let currentReadLaterFeed = null;
+      let readLaterSubmissionActive = false;
 
       render(initialFeeds);
-      loadCodexStatus();
+      void loadReadLaterItems();
+      void loadCodexStatus();
 
       codexProbe.addEventListener('click', async () => {
         codexProbe.disabled = true;
         codexStatus.textContent = '正在执行最小额度探测…';
         try {
-          const response = await fetch('/api/codex/probe', { method: 'POST' });
+          const response = await fetch('/api/codex/probe', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: '{}',
+          });
           const data = await response.json();
           const probeError = data.result?.error || data.error || '探测失败';
           await loadCodexStatus();
@@ -502,21 +530,25 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
       });
 
       async function loadCodexStatus() {
-        const response = await fetch('/api/codex/status');
-        const data = await response.json();
-        if (!response.ok || !data.ok) {
-          codexStatus.textContent = data.error || 'Codex 状态不可用';
+        try {
+          const response = await fetch('/api/codex/status');
+          const data = await readJsonResponse(response, 'Codex 状态不可用');
+          if (!data.ok) {
+            throw new Error(data.error || 'Codex 状态不可用');
+          }
+          const circuit = data.circuit || {};
+          const totals = data.usage?.totals || {};
+          codexStatus.textContent = [
+            '熔断状态：' + (circuit.state || 'closed'),
+            circuit.next_probe_at ? '下次自动探测：' + circuit.next_probe_at : '',
+            '已记录请求：' + Number(totals.request_count || 0),
+            'input/output/total：' + formatUsage(totals.input_tokens) + '/' + formatUsage(totals.output_tokens) + '/' + formatUsage(totals.total_tokens),
+          ].filter(Boolean).join('；');
+          codexProbe.disabled = false;
+        } catch (error) {
+          codexStatus.textContent = error.message || 'Codex 状态不可用';
           codexProbe.disabled = true;
-          return;
         }
-        const circuit = data.circuit || {};
-        const totals = data.usage?.totals || {};
-        codexStatus.textContent = [
-          '熔断状态：' + (circuit.state || 'closed'),
-          circuit.next_probe_at ? '下次自动探测：' + circuit.next_probe_at : '',
-          '已记录请求：' + Number(totals.request_count || 0),
-          'input/output/total：' + formatUsage(totals.input_tokens) + '/' + formatUsage(totals.output_tokens) + '/' + formatUsage(totals.total_tokens),
-        ].filter(Boolean).join('；');
       }
 
       function formatUsage(value) {
@@ -556,6 +588,10 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
 
       readLaterForm.addEventListener('submit', async (event) => {
         event.preventDefault();
+        if (readLaterSubmissionActive) {
+          return;
+        }
+
         const formData = new FormData(readLaterForm);
         const payload = {
           url: String(formData.get('url') || '').trim(),
@@ -564,25 +600,67 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
           translate: formData.get('translate') === 'true',
         };
 
+        readLaterSubmissionActive = true;
+        readLaterSubmit.disabled = true;
         try {
-          setReadLaterStatus('正在保存…');
-          const response = await fetch('/api/read-later', {
+          setReadLaterStatus('正在提交保存任务…');
+          const response = await fetch('/api/read-later/jobs', {
             method: 'POST',
-            headers: { 'content-type': 'application/json' },
+            headers: {
+              'content-type': 'application/json',
+              'Idempotency-Key': createIdempotencyKey(),
+            },
             body: JSON.stringify(payload),
           });
-          const data = await response.json();
-          if (!response.ok || !data.ok) {
-            throw new Error(data.error || '保存失败');
+          const job = await readJsonResponse(response, '提交保存任务失败');
+          if (response.status !== 202 || !job.jobId) {
+            throw new Error(job.error || 'NewRSS 返回了无效的保存任务');
           }
 
+          const result = await pollReadLaterJob(job.jobId);
           readLaterForm.reset();
-          setReadLaterStatus(\`已保存：\${data.result.title}（\${data.result.strategy}，\${data.result.translated ? '已翻译' : '原文'}）\`);
+          readLaterPage.offset = 0;
+          readLaterPage.query = '';
+          setReadLaterStatus(\`已保存：\${result.title}（\${result.strategy}，\${result.translated ? '已翻译' : '原文'}）\`);
           await reload();
         } catch (error) {
           setReadLaterStatus(error.message);
+        } finally {
+          readLaterSubmissionActive = false;
+          readLaterSubmit.disabled = false;
         }
       });
+
+      async function pollReadLaterJob(jobId) {
+        const maxAttempts = 150;
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+          if (attempt > 0) {
+            await delay(2000);
+          }
+
+          const response = await fetch(\`/api/read-later/jobs/\${encodeURIComponent(jobId)}\`);
+          const job = await readJsonResponse(response, '查询保存任务失败');
+          if (job.jobId !== jobId) {
+            throw new Error('NewRSS 返回了不匹配的保存任务');
+          }
+          if (job.status === 'done') {
+            if (!job.result) {
+              throw new Error('保存任务已完成，但没有返回结果');
+            }
+            return job.result;
+          }
+          if (job.status === 'failed') {
+            throw new Error(job.error || '保存任务执行失败');
+          }
+          if (job.status !== 'queued' && job.status !== 'running') {
+            throw new Error('NewRSS 返回了无效的保存任务状态');
+          }
+
+          setReadLaterStatus(job.status === 'queued' ? '保存任务正在排队…' : '正在抓取和处理文章…');
+        }
+
+        throw new Error('保存任务仍在处理，请稍后刷新页面确认结果');
+      }
 
       exportForm.addEventListener('submit', (event) => {
         event.preventDefault();
@@ -607,6 +685,10 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
           setOpmlStatus('请选择一个 OPML 文件');
           return;
         }
+        if (file.size > maxOpmlFileBytes) {
+          setOpmlStatus('OPML 文件不能超过 2 MiB');
+          return;
+        }
 
         try {
           setOpmlStatus('正在导入…');
@@ -616,8 +698,8 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ opmlXml, folder }),
           });
-          const data = await response.json();
-          if (!response.ok || !data.ok) {
+          const data = await readJsonResponse(response, '导入失败');
+          if (!data.ok) {
             throw new Error(data.error || '导入失败');
           }
 
@@ -631,14 +713,20 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
 
       async function reload() {
         const response = await fetch('/api/feeds');
-        const data = await response.json();
+        const data = await readJsonResponse(response, '读取源列表失败');
+        if (!data.ok) {
+          throw new Error(data.error || '读取源列表失败');
+        }
         render(data.feeds || []);
+        await loadReadLaterItems();
       }
 
       function render(feeds) {
         const readLaterFeed = feeds.find((feed) => feed.isManaged && feed.name === readLaterFeedName) || null;
         const sourceFeeds = feeds.filter((feed) => !(feed.isManaged && feed.name === readLaterFeedName));
 
+        currentReadLaterFeed = readLaterFeed;
+        syncExportFolders(sourceFeeds);
         renderReadLaterSection(readLaterFeed);
 
         const groups = new Map();
@@ -698,20 +786,12 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
             }).join('')
           : '<div class="empty">还没有配置任何源。</div>';
 
-        document.querySelectorAll('button[data-action]').forEach((button) => {
+        root.querySelectorAll('button[data-action]').forEach((button) => {
           button.addEventListener('click', async () => {
             const action = button.dataset.action;
             const name = button.dataset.name;
             try {
-              if (action === 'delete-read-later-entry') {
-                const entryId = button.dataset.entryId;
-                if (!window.confirm('确定删除这条 Read Later 吗？')) return;
-                setReadLaterStatus('正在删除条目…');
-                const response = await fetch(\`/api/read-later/items/\${encodeURIComponent(entryId)}\`, { method: 'DELETE' });
-                const data = await response.json();
-                if (!response.ok || !data.ok) throw new Error(data.error || '删除条目失败');
-                setReadLaterStatus('条目已删除');
-              } else if (action === 'delete') {
+              if (action === 'delete') {
                 if (!window.confirm(\`确定删除源 "\${name}" 吗？\`)) return;
                 setStatus('正在删除…');
                 const response = await fetch(\`/api/feeds/\${encodeURIComponent(name)}\`, { method: 'DELETE' });
@@ -719,7 +799,11 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
                 if (!response.ok || !data.ok) throw new Error(data.error || '删除失败');
               } else if (action === 'refresh') {
                 setStatus('正在刷新…');
-                const response = await fetch(\`/api/feeds/\${encodeURIComponent(name)}/refresh\`, { method: 'POST' });
+                const response = await fetch(\`/api/feeds/\${encodeURIComponent(name)}/refresh\`, {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: '{}',
+                });
                 const data = await response.json();
                 if (!response.ok || !data.ok) throw new Error(data.error || '刷新失败');
               } else if (action === 'toggle-translate') {
@@ -745,12 +829,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
             }
           });
         });
-
-        document.querySelectorAll('[data-role="read-later-search"]').forEach((input) => {
-          input.addEventListener('input', () => {
-            applyReadLaterSearch(input);
-          });
-        });
+        bindReadLaterControls();
       }
 
       function setStatus(message) {
@@ -763,6 +842,126 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
 
       function setReadLaterStatus(message) {
         readLaterStatus.textContent = message || '';
+      }
+
+      async function loadReadLaterItems() {
+        readLaterPage.loading = true;
+        readLaterPage.error = '';
+        renderReadLaterSection(currentReadLaterFeed);
+        bindReadLaterControls();
+
+        try {
+          const url = new URL('/api/read-later/items', window.location.origin);
+          url.searchParams.set('limit', String(readLaterPage.limit));
+          url.searchParams.set('offset', String(readLaterPage.offset));
+          const normalizedQuery = normalizeReadLaterQuery(readLaterPage.query);
+          if (normalizedQuery) {
+            url.searchParams.set('q', normalizedQuery);
+          }
+
+          const response = await fetch(url.pathname + url.search);
+          const data = await readJsonResponse(response, '读取 Read Later 条目失败');
+          const items = Array.isArray(data.items) ? data.items : [];
+          const total = Math.max(0, Number(data.total) || 0);
+          const limit = Math.max(1, Number(data.limit) || readLaterPage.limit);
+          const offset = Math.max(0, Number(data.offset) || 0);
+
+          if (!items.length && total > 0 && offset >= total) {
+            readLaterPage.total = total;
+            readLaterPage.limit = limit;
+            readLaterPage.offset = Math.floor((total - 1) / limit) * limit;
+            return await loadReadLaterItems();
+          }
+
+          readLaterPage.items = items;
+          readLaterPage.total = total;
+          readLaterPage.limit = limit;
+          readLaterPage.offset = offset;
+        } catch (error) {
+          readLaterPage.items = [];
+          readLaterPage.error = error.message;
+        } finally {
+          readLaterPage.loading = false;
+          renderReadLaterSection(currentReadLaterFeed);
+          bindReadLaterControls();
+        }
+      }
+
+      function bindReadLaterControls() {
+        const panel = readLaterRoot.querySelector('.read-later-panel');
+        panel?.addEventListener('toggle', () => {
+          readLaterPage.open = panel.open;
+        });
+
+        const searchForm = readLaterRoot.querySelector('[data-role="read-later-search-form"]');
+        searchForm?.addEventListener('submit', async (event) => {
+          event.preventDefault();
+          const input = searchForm.querySelector('[data-role="read-later-search"]');
+          readLaterPage.query = String(input?.value || '').trim();
+          readLaterPage.offset = 0;
+          readLaterPage.open = true;
+          await loadReadLaterItems();
+        });
+
+        readLaterRoot.querySelectorAll('button[data-action="delete-read-later-entry"]').forEach((button) => {
+          button.addEventListener('click', async () => {
+            if (!window.confirm('确定删除这条 Read Later 吗？')) {
+              return;
+            }
+            button.disabled = true;
+            try {
+              setReadLaterStatus('正在删除条目…');
+              const response = await fetch(
+                \`/api/read-later/items/\${encodeURIComponent(button.dataset.entryId)}\`,
+                { method: 'DELETE' }
+              );
+              const data = await readJsonResponse(response, '删除条目失败');
+              if (!data.ok) {
+                throw new Error(data.error || '删除条目失败');
+              }
+              setReadLaterStatus('条目已删除');
+              await reload();
+            } catch (error) {
+              setReadLaterStatus(error.message);
+              button.disabled = false;
+            }
+          });
+        });
+
+        readLaterRoot.querySelector('[data-action="read-later-page-prev"]')?.addEventListener('click', async () => {
+          readLaterPage.offset = Math.max(0, readLaterPage.offset - readLaterPage.limit);
+          readLaterPage.open = true;
+          await loadReadLaterItems();
+        });
+        readLaterRoot.querySelector('[data-action="read-later-page-next"]')?.addEventListener('click', async () => {
+          if (readLaterPage.offset + readLaterPage.limit >= readLaterPage.total) {
+            return;
+          }
+          readLaterPage.offset += readLaterPage.limit;
+          readLaterPage.open = true;
+          await loadReadLaterItems();
+        });
+      }
+
+      function syncExportFolders(feeds) {
+        const select = exportForm.elements.folder;
+        const selected = String(select.value || '');
+        const folders = Array.from(new Set(
+          feeds.map((feed) => normalizeFolder(feed.folder)).filter(Boolean)
+        )).sort((a, b) => a.localeCompare(b));
+
+        select.replaceChildren();
+        const allOption = document.createElement('option');
+        allOption.value = '';
+        allOption.textContent = '全部目录';
+        select.append(allOption);
+        for (const folder of folders) {
+          const option = document.createElement('option');
+          option.value = folder;
+          option.textContent = folder;
+          select.append(option);
+        }
+        select.value = folders.includes(selected) ? selected : '';
       }
 
       function renderErrors(feed) {
@@ -832,13 +1031,18 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
           return '';
         }
 
-        const items = Array.isArray(feed.items) ? feed.items : [];
-        const body = items.length
-          ? \`<label class="entry-search">
-              <span>搜索条目</span>
-              <input type="search" data-role="read-later-search" placeholder="按标题或原文链接搜索" />
-            </label>
-            <div class="entry-list" data-role="read-later-entry-list">\${items.map((item) => \`<div class="entry-item" data-role="read-later-entry-item" data-search="\${escapeHtml(buildReadLaterSearchText(item))}">
+        const items = readLaterPage.items;
+        const start = readLaterPage.total ? readLaterPage.offset + 1 : 0;
+        const end = readLaterPage.offset + items.length;
+        const search = \`<form class="entry-search" data-role="read-later-search-form">
+          <label>
+            <span>搜索条目</span>
+            <input type="search" data-role="read-later-search" value="\${escapeHtml(readLaterPage.query)}" placeholder="按标题或原文链接搜索" />
+          </label>
+          <button type="submit">搜索</button>
+        </form>\`;
+        const list = items.length
+          ? \`<div class="entry-list" data-role="read-later-entry-list">\${items.map((item) => \`<div class="entry-item" data-role="read-later-entry-item">
               <a class="entry-title" href="\${escapeHtml(item.articleUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(item.title || 'Untitled')}</a>
               <div class="entry-meta">
                 <div>原文：<a href="\${escapeHtml(item.sourceUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(item.sourceUrl)}</a></div>
@@ -849,43 +1053,56 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
                 <a class="button-like" href="\${escapeHtml(item.articleUrl)}" target="_blank" rel="noreferrer">查看文章</a>
                 <button class="danger" type="button" data-action="delete-read-later-entry" data-entry-id="\${escapeHtml(item.id)}">删除条目</button>
               </div>
-            </div>\`).join('')}</div>
-            <div class="empty" data-role="read-later-empty-search" hidden>没有匹配的条目。</div>\`
-          : '<div class="empty">Read Later 里还没有条目。</div>';
+            </div>\`).join('')}</div>\`
+          : \`<div class="empty">\${readLaterPage.query ? '没有匹配的条目。' : 'Read Later 里还没有条目。'}</div>\`;
+        const body = readLaterPage.loading
+          ? '<div class="empty">正在读取 Read Later 条目…</div>'
+          : readLaterPage.error
+            ? \`<div class="error-box">\${escapeHtml(readLaterPage.error)}</div>\`
+            : \`\${search}\${list}
+              <div class="inline-actions">
+                <button type="button" data-action="read-later-page-prev" \${readLaterPage.offset <= 0 ? 'disabled' : ''}>上一页</button>
+                <span class="pagination-summary">\${start}-\${end} / \${readLaterPage.total}</span>
+                <button type="button" data-action="read-later-page-next" \${end >= readLaterPage.total ? 'disabled' : ''}>下一页</button>
+              </div>\`;
 
-        return \`<details class="read-later-panel">
+        return \`<details class="read-later-panel" \${readLaterPage.open ? 'open' : ''}>
           <summary class="read-later-summary">
-            <span class="read-later-summary-main">Read Later 条目 <span class="pill">\${items.length}</span></span>
+            <span class="read-later-summary-main">Read Later 条目 <span class="pill">\${readLaterPage.total}</span></span>
           </summary>
           \${body}
         </details>\`;
       }
 
-      function applyReadLaterSearch(input) {
-        const panel = input.closest('.read-later-panel');
-        const query = String(input.value || '').trim().toLowerCase();
-        const items = Array.from(panel?.querySelectorAll('[data-role="read-later-entry-item"]') || []);
-        let visibleCount = 0;
-
-        for (const item of items) {
-          const haystack = String(item.dataset.search || '').toLowerCase();
-          const matched = !query || haystack.includes(query);
-          item.hidden = !matched;
-          if (matched) {
-            visibleCount += 1;
-          }
-        }
-
-        const empty = panel?.querySelector('[data-role="read-later-empty-search"]');
-        if (empty) {
-          empty.hidden = visibleCount > 0;
-        }
+      function normalizeReadLaterQuery(value) {
+        return String(value || '').trim().normalize('NFKC');
       }
 
-      function buildReadLaterSearchText(item) {
-        return [item.title || '', item.sourceUrl || '', item.sourcePublishedAt || '']
-          .join(' ')
-          .normalize('NFKC');
+      async function readJsonResponse(response, fallbackMessage) {
+        let data;
+        try {
+          data = await response.json();
+        } catch {
+          const suffix = response.status ? '（HTTP ' + response.status + '）' : '';
+          throw new Error(fallbackMessage + suffix);
+        }
+
+        if (!response.ok) {
+          const suffix = response.status ? '（HTTP ' + response.status + '）' : '';
+          throw new Error(data?.error || fallbackMessage + suffix);
+        }
+        return data || {};
+      }
+
+      function createIdempotencyKey() {
+        if (typeof window.crypto?.randomUUID === 'function') {
+          return window.crypto.randomUUID();
+        }
+        return 'admin-' + Date.now() + '-' + Math.random().toString(36).slice(2, 14);
+      }
+
+      function delay(milliseconds) {
+        return new Promise((resolve) => setTimeout(resolve, milliseconds));
       }
 
       function escapeHtml(value) {

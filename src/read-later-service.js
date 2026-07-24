@@ -1,8 +1,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 const { resolveArticleContent } = require('./extractor');
+const { sanitizeHtml } = require('./html-sanitizer');
 const { renderMarkdown } = require('./markdown-renderer');
-const { importXUrl } = require('./x-importer');
+const { canonicalXIdentity, importXUrl } = require('./x-importer');
 const TranslationService = require('./translation-service');
 const {
   buildManagedFeedSourceUrl,
@@ -22,37 +24,108 @@ class ReadLaterService {
     this.config = config;
     this.feedService = feedService;
     this.translationService = new TranslationService(buildReadLaterTranslationConfig(config), { db });
+    this.activeSaves = new Map();
+    this.saveChains = new Map();
+    this.activeTranslationRetry = null;
+    if (this.config.readLaterStoragePath) {
+      cleanupStaleWorkspaces(this.config.readLaterStoragePath);
+    }
   }
 
-  async saveUrl({ request, url, title = '', mode = 'auto', translate = true }) {
-    const parsedUrl = new URL(String(url || '').trim());
-    const normalizedUrl = parsedUrl.toString();
+  async saveUrl({ request, baseUrl = '', url, title = '', mode = 'auto', translate = true }) {
+    const normalized = normalizeReadLaterUrl(url);
+    const normalizedUrl = normalized.url;
     const normalizedMode = this.normalizeMode(mode);
+    const saveKey = JSON.stringify([normalized.identity, normalizedMode, Boolean(translate), String(title || '').trim()]);
+    if (this.activeSaves.has(saveKey)) {
+      return this.activeSaves.get(saveKey);
+    }
+
+    const previousSave = this.saveChains.get(normalized.identity) || Promise.resolve();
+    const operation = previousSave.catch(() => {}).then(() => this.saveUrlUnlocked({
+      request,
+      baseUrl,
+      normalized,
+      title,
+      normalizedMode,
+      translate: Boolean(translate),
+    }));
+    const cleanup = () => {
+      if (this.activeSaves.get(saveKey) === operation) {
+        this.activeSaves.delete(saveKey);
+      }
+      if (this.saveChains.get(normalized.identity) === operation) {
+        this.saveChains.delete(normalized.identity);
+      }
+    };
+    operation.then(cleanup, cleanup);
+    this.saveChains.set(normalized.identity, operation);
+    this.activeSaves.set(saveKey, operation);
+    return operation;
+  }
+
+  async saveUrlUnlocked({ request, baseUrl, normalized, title, normalizedMode, translate }) {
+    const normalizedUrl = normalized.url;
     const feedName = this.config.readLaterFeedName;
-    const sourceGuid = hashText(normalizedUrl);
+    const sourceGuid = hashText(normalized.identity);
     const workspaceDir = path.join(this.config.readLaterStoragePath, sourceGuid);
+    const temporaryWorkspaceDir = path.join(
+      this.config.readLaterStoragePath,
+      `.${sourceGuid}.${randomUUID()}.tmp`
+    );
     const now = isoNow();
     const existing = this.db.getEntryByFeedAndGuid(feedName, sourceGuid);
-    const imported = await this.importUrl({
-      mode: normalizedMode,
-      url: normalizedUrl,
-      workspaceDir,
-      title,
-    });
-    const translation = await this.maybeTranslateImported({
-      translate,
-      imported,
-      sourceUrl: normalizedUrl,
-    });
-    const sourceContentHtml = imported.sourceContentHtml || imported.extractedContentHtml || '';
-    const displayContentHtml = translation?.translatedContentHtml || imported.extractedContentHtml || sourceContentHtml || '';
-    const displayTitle = translation?.translatedTitle || imported.sourceTitle;
-    const translationProvider = translation
-      ? `${imported.translationProvider}+${translation.provider}`
-      : imported.translationProvider;
-    const archivedHtmlPath = imported.htmlPath || null;
+    let workspaceSwap = null;
 
-    if (archivedHtmlPath && displayContentHtml) {
+    try {
+      const imported = await this.importUrl({
+        mode: normalizedMode,
+        url: normalizedUrl,
+        workspaceDir: temporaryWorkspaceDir,
+        title,
+      });
+      const sourceContentHtml = sanitizeHtml(
+        imported.sourceContentHtml || imported.extractedContentHtml || '',
+        { baseUrl: normalizedUrl }
+      );
+      const extractedCandidate = sanitizeHtml(
+        imported.extractedContentHtml || sourceContentHtml,
+        { baseUrl: normalizedUrl }
+      );
+      const existingExtracted = existing?.extracted_content_html || existing?.source_content_html || '';
+      const contentUnchanged = Boolean(existing) &&
+        (existing.source_title || '') === (imported.sourceTitle || '') &&
+        existingExtracted === extractedCandidate;
+      const preservedTranslation = contentUnchanged && existing?.translated_content_html
+        ? {
+            translatedTitle: existing.translated_title || null,
+            translatedContentHtml: existing.translated_content_html,
+            provider: existing.translation_provider || imported.translationProvider,
+          }
+        : null;
+      const translationResult = preservedTranslation
+        ? { translation: preservedTranslation, error: null, preserved: true }
+        : await this.maybeTranslateImported({
+            translate,
+            imported: { ...imported, sourceContentHtml, extractedContentHtml: extractedCandidate },
+            sourceUrl: normalizedUrl,
+          });
+      const translation = translationResult.translation
+        ? {
+            ...translationResult.translation,
+            translatedContentHtml: sanitizeHtml(translationResult.translation.translatedContentHtml, {
+              baseUrl: normalizedUrl,
+            }),
+          }
+        : null;
+      const displayContentHtml = translation?.translatedContentHtml || extractedCandidate || sourceContentHtml || '';
+      const displayTitle = translation?.translatedTitle || imported.sourceTitle;
+      const translationProvider = translationResult.preserved
+        ? translation.provider
+        : translation
+          ? `${imported.translationProvider}+${translation.provider}`
+          : imported.translationProvider;
+      const archivedHtmlPath = path.join(temporaryWorkspaceDir, 'article.html');
       fs.writeFileSync(
         archivedHtmlPath,
         renderArchivedHtmlPage({
@@ -60,130 +133,278 @@ class ReadLaterService {
           sourceUrl: normalizedUrl,
           contentHtml: displayContentHtml,
           provider: translationProvider,
+          language: translation ? 'zh-CN' : 'en',
         }),
-        'utf8'
+        { encoding: 'utf8', mode: 0o600 }
       );
+
+      this.feedService.ensureFeed(
+        feedName,
+        buildManagedFeedSourceUrl(feedName),
+        this.config.readLaterFeedTitle,
+        this.config.readLaterFeedFolder
+      );
+
+      workspaceSwap = replaceWorkspace(temporaryWorkspaceDir, workspaceDir);
+      const sourcePublishedAt = imported.sourcePublishedAt || existing?.source_published_at || now;
+      const translatedTitle = translation?.translatedTitle || null;
+      const translatedContentHtml = translation?.translatedContentHtml || null;
+      const displayChanged = !existing ||
+        (existing.source_title || '') !== (imported.sourceTitle || '') ||
+        existingExtracted !== extractedCandidate ||
+        (existing.translated_title || '') !== (translatedTitle || '') ||
+        (existing.translated_content_html || '') !== (translatedContentHtml || '');
+      const refreshStatus = translationResult.error ? 'partial' : 'ok';
+      const refreshError = publicReadLaterError(translationResult.error);
+
+      this.db.upsertEntry({
+        feedName,
+        sourceGuid,
+        sourceUrl: normalizedUrl,
+        sourceTitle: imported.sourceTitle,
+        sourceAuthor: imported.sourceAuthor || '',
+        sourcePublishedAt,
+        sourceContentHtml,
+        extractedContentHtml: extractedCandidate === sourceContentHtml ? null : extractedCandidate,
+        sourceFetchedAt: now,
+        contentUpdatedAt: contentUnchanged ? existing.content_updated_at || now : now,
+        translatedTitle,
+        translatedContentHtml,
+        articleExcerpt: truncate(stripHtml(displayContentHtml), 240),
+        translationProvider,
+        refreshStatus,
+        refreshError,
+        refreshedAt: now,
+        createdAt: existing?.created_at || now,
+        updatedAt: now,
+      });
+      if (!contentUnchanged) {
+        this.db.clearEntryTranslationFailure(feedName, sourceGuid);
+      }
+      if (translationResult.error) {
+        this.db.recordEntryTranslationFailure(
+          feedName,
+          sourceGuid,
+          refreshError,
+          now,
+          nextReadLaterTranslationRetryAt(
+            contentUnchanged ? existing : null,
+            now,
+            translationResult.error.retryAfter
+          )
+        );
+      } else {
+        this.db.clearEntryTranslationFailure(feedName, sourceGuid);
+      }
+      if (displayChanged) {
+        this.db.bumpFeedContentRevision(feedName, now);
+      }
+      this.db.setFeedRefreshResult(feedName, now, refreshStatus, refreshError);
+      const savedEntry = this.db.getEntryByFeedAndGuid(feedName, sourceGuid);
+      if (!savedEntry) {
+        throw new Error('failed to persist read-later entry');
+      }
+      workspaceSwap.commit();
+      workspaceSwap = null;
+
+      const resolvedBaseUrl = String(baseUrl || this.feedService.baseUrl(request)).replace(/\/$/, '');
+      return {
+        feedName,
+        feedTitle: this.config.readLaterFeedTitle,
+        entryId: savedEntry.id,
+        articleUrl: `${resolvedBaseUrl}/articles/${savedEntry.id}`,
+        feedUrl: `${resolvedBaseUrl}/feeds/${encodeURIComponent(feedName)}.xml`,
+        sourceGuid,
+        sourceUrl: normalizedUrl,
+        title: savedEntry.translated_title || savedEntry.source_title || displayTitle,
+        mode: normalizedMode,
+        translate,
+        translated: Boolean(translatedContentHtml),
+        translationError: refreshError || null,
+        strategy: imported.strategy,
+        storage: {
+          workspaceDir,
+          markdownPath: imported.markdownPath ? path.join(workspaceDir, path.basename(imported.markdownPath)) : null,
+          htmlPath: path.join(workspaceDir, 'article.html'),
+        },
+        existed: Boolean(existing),
+      };
+    } catch (error) {
+      workspaceSwap?.rollback();
+      fs.rmSync(temporaryWorkspaceDir, { recursive: true, force: true });
+      throw error;
     }
-
-    this.feedService.ensureFeed(
-      feedName,
-      buildManagedFeedSourceUrl(feedName),
-      this.config.readLaterFeedTitle,
-      this.config.readLaterFeedFolder
-    );
-
-    const sourcePublishedAt = imported.sourcePublishedAt || existing?.source_published_at || now;
-
-    this.db.upsertEntry({
-      feedName,
-      sourceGuid,
-      sourceUrl: normalizedUrl,
-      sourceTitle: imported.sourceTitle,
-      sourceAuthor: imported.sourceAuthor || '',
-      sourcePublishedAt,
-      sourceContentHtml: sourceContentHtml,
-      extractedContentHtml: imported.extractedContentHtml || sourceContentHtml,
-      translatedTitle: translation?.translatedTitle || null,
-      translatedContentHtml: translation?.translatedContentHtml || null,
-      articleExcerpt: truncate(stripHtml(displayContentHtml), 240),
-      translationProvider,
-      refreshStatus: 'ok',
-      refreshError: '',
-      refreshedAt: now,
-      createdAt: existing?.created_at || now,
-      updatedAt: now,
-    });
-
-    this.db.setFeedRefreshResult(feedName, now, 'ok', '');
-    const savedEntry = this.db.getEntryByFeedAndGuid(feedName, sourceGuid);
-
-    if (!savedEntry) {
-      throw new Error('failed to persist read-later entry');
-    }
-
-    const baseUrl = this.feedService.baseUrl(request);
-
-    return {
-      feedName,
-      feedTitle: this.config.readLaterFeedTitle,
-      entryId: savedEntry.id,
-      articleUrl: `${baseUrl}/articles/${savedEntry.id}`,
-      feedUrl: `${baseUrl}/feeds/${encodeURIComponent(feedName)}.xml`,
-      sourceGuid,
-      sourceUrl: normalizedUrl,
-      title: savedEntry.translated_title || savedEntry.source_title || displayTitle,
-      mode: normalizedMode,
-      translate,
-      translated: Boolean(translation),
-      strategy: imported.strategy,
-      storage: {
-        workspaceDir,
-        markdownPath: imported.markdownPath || null,
-        htmlPath: archivedHtmlPath,
-      },
-      existed: Boolean(existing),
-    };
   }
 
   async maybeTranslateImported({ translate, imported, sourceUrl }) {
     if (!translate) {
-      return null;
+      return { translation: null, error: null, preserved: false };
     }
 
     if (!this.translationService.shouldTranslate({
       title: imported.sourceTitle,
       contentHtml: imported.extractedContentHtml || imported.sourceContentHtml || '',
     })) {
-      return null;
+      return { translation: null, error: null, preserved: false };
     }
 
     try {
       if (imported.sourceMarkdown) {
-        return await this.translationService.translateMarkdown({
+        const translation = await this.translationService.translateMarkdown({
           sourceTitle: imported.sourceTitle,
           markdown: imported.sourceMarkdown,
           sourceUrl,
           sourceAuthor: imported.sourceAuthor || '',
         });
+        return { translation, error: null, preserved: false };
       }
 
-      return await this.translationService.translateArticle({
+      const translation = await this.translationService.translateArticle({
         sourceTitle: imported.sourceTitle,
         contentHtml: imported.extractedContentHtml || imported.sourceContentHtml || '',
         sourceUrl,
       });
+      return { translation, error: null, preserved: false };
     } catch (error) {
       console.error(`[translate] skipped for ${sourceUrl}: ${error.message}`);
-      return null;
+      return { translation: null, error, preserved: false };
     }
   }
 
-  listItems({ request, limit = 50 }) {
-    const existingFeed = this.db.getFeedByName(this.config.readLaterFeedName);
-    if (existingFeed) {
-      this.feedService.ensureFeed(
-        this.config.readLaterFeedName,
-        buildManagedFeedSourceUrl(this.config.readLaterFeedName),
-        this.config.readLaterFeedTitle,
-        this.config.readLaterFeedFolder
-      );
+  retryDueTranslations(limit = 50) {
+    if (this.activeTranslationRetry) {
+      return this.activeTranslationRetry;
     }
+    const operation = this.retryDueTranslationsUnlocked(limit);
+    this.activeTranslationRetry = operation;
+    const cleanup = () => {
+      if (this.activeTranslationRetry === operation) {
+        this.activeTranslationRetry = null;
+      }
+    };
+    operation.then(cleanup, cleanup);
+    return operation;
+  }
 
+  async retryDueTranslationsUnlocked(limit) {
+    const feedName = this.config.readLaterFeedName;
+    const entries = this.db.listDueReadLaterTranslationRetries(feedName, isoNow(), limit);
+    const results = [];
+    for (const entry of entries) {
+      const contentHtml = entry.extracted_content_html || entry.source_content_html || '';
+      if (!this.translationService.isEnabled()) {
+        results.push({ entryId: entry.id, status: 'deferred' });
+        continue;
+      }
+      if (!this.translationService.shouldTranslate({ title: entry.source_title, contentHtml })) {
+        this.db.clearEntryTranslationFailure(feedName, entry.source_guid);
+        results.push({ entryId: entry.id, status: 'skipped' });
+        continue;
+      }
+
+      try {
+        const translation = await this.translationService.translateArticle({
+          sourceTitle: entry.source_title || '',
+          contentHtml,
+          sourceUrl: entry.source_url,
+        });
+        if (!translation) {
+          results.push({ entryId: entry.id, status: 'deferred' });
+          continue;
+        }
+        const current = this.db.getEntryByFeedAndGuid(feedName, entry.source_guid);
+        if (!isSameReadLaterEntryVersion(entry, current)) {
+          results.push({ entryId: entry.id, status: 'superseded' });
+          continue;
+        }
+        const now = isoNow();
+        const translatedContentHtml = sanitizeHtml(translation.translatedContentHtml, {
+          baseUrl: entry.source_url,
+        });
+        this.db.upsertEntry({
+          feedName,
+          sourceGuid: entry.source_guid,
+          sourceUrl: entry.source_url,
+          sourceTitle: entry.source_title,
+          sourceAuthor: entry.source_author,
+          sourcePublishedAt: entry.source_published_at,
+          sourceContentHtml: entry.source_content_html,
+          extractedContentHtml: entry.extracted_content_html,
+          sourceFetchedAt: entry.source_fetched_at || entry.refreshed_at,
+          contentUpdatedAt: now,
+          translatedTitle: translation.translatedTitle,
+          translatedContentHtml,
+          articleExcerpt: truncate(stripHtml(translatedContentHtml || contentHtml), 240),
+          translationProvider: `${baseTranslationProvider(entry.translation_provider)}+${translation.provider}`,
+          refreshStatus: 'ok',
+          refreshError: '',
+          refreshedAt: now,
+          createdAt: entry.created_at,
+          updatedAt: now,
+        });
+        this.db.clearEntryTranslationFailure(feedName, entry.source_guid);
+        this.db.bumpFeedContentRevision(feedName, now);
+        this.db.setFeedRefreshResult(feedName, now, 'ok', '');
+        results.push({ entryId: entry.id, status: 'ok' });
+      } catch (error) {
+        const current = this.db.getEntryByFeedAndGuid(feedName, entry.source_guid);
+        if (!isSameReadLaterEntryVersion(entry, current)) {
+          results.push({ entryId: entry.id, status: 'superseded' });
+          continue;
+        }
+        const failedAt = isoNow();
+        const publicError = publicReadLaterError(error);
+        this.db.recordEntryTranslationFailure(
+          feedName,
+          entry.source_guid,
+          publicError,
+          failedAt,
+          nextReadLaterTranslationRetryAt(entry, failedAt, error.retryAfter)
+        );
+        this.db.setFeedRefreshResult(feedName, failedAt, 'partial', publicError);
+        results.push({ entryId: entry.id, status: 'error', error: publicError });
+      }
+    }
+    return results;
+  }
+
+  listItems({ request, limit = 50 }) {
+    return this.listItemsPage({ request, limit }).items;
+  }
+
+  listItemsPage({ request, limit = 50, offset = 0, search = '' }) {
     const baseUrl = this.feedService.baseUrl(request);
-    return this.db.listEntriesByFeed(this.config.readLaterFeedName, limit).map((entry) => ({
+    const items = this.db.listReadLaterEntries(this.config.readLaterFeedName, {
+      limit,
+      offset,
+      search: String(search || '').normalize('NFKC'),
+    }).map((entry) => ({
       id: entry.id,
       title: entry.translated_title || entry.source_title || 'Untitled',
       sourceUrl: entry.source_url,
       articleUrl: `${baseUrl}/articles/${entry.id}`,
       sourcePublishedAt: entry.source_published_at || null,
       refreshedAt: entry.refreshed_at,
-      translated: Boolean(entry.translated_content_html),
+      translated: Boolean(entry.is_translated),
     }));
+    return {
+      items,
+      total: this.db.countReadLaterEntries(this.config.readLaterFeedName, {
+        search: String(search || '').normalize('NFKC'),
+      }),
+      limit,
+      offset,
+      search: String(search || ''),
+    };
   }
 
   deleteItem(entryId) {
-    const normalizedId = Number.parseInt(String(entryId), 10);
-    if (!Number.isInteger(normalizedId) || normalizedId <= 0) {
+    const rawId = String(entryId || '');
+    if (!/^[1-9]\d*$/.test(rawId)) {
+      throw new Error('invalid read-later entry id');
+    }
+    const normalizedId = Number(rawId);
+    if (!Number.isSafeInteger(normalizedId)) {
       throw new Error('invalid read-later entry id');
     }
 
@@ -194,10 +415,31 @@ class ReadLaterService {
       };
     }
 
-    const deleted = this.db.deleteEntryByFeedAndId(this.config.readLaterFeedName, normalizedId);
+    const workspaceDir = path.join(this.config.readLaterStoragePath, existing.source_guid);
+    const pendingDeleteDir = path.join(
+      this.config.readLaterStoragePath,
+      `.${existing.source_guid}.${randomUUID()}.delete`
+    );
+    let moved = false;
+    if (fs.existsSync(workspaceDir)) {
+      fs.renameSync(workspaceDir, pendingDeleteDir);
+      moved = true;
+    }
+
+    let deleted;
+    try {
+      deleted = this.db.deleteEntryByFeedAndId(this.config.readLaterFeedName, normalizedId);
+    } catch (error) {
+      if (moved) {
+        fs.renameSync(pendingDeleteDir, workspaceDir);
+      }
+      throw error;
+    }
     if (deleted.changes) {
-      const workspaceDir = path.join(this.config.readLaterStoragePath, existing.source_guid);
-      fs.rmSync(workspaceDir, { recursive: true, force: true });
+      fs.rmSync(pendingDeleteDir, { recursive: true, force: true });
+      this.db.bumpFeedContentRevision(this.config.readLaterFeedName);
+    } else if (moved) {
+      fs.renameSync(pendingDeleteDir, workspaceDir);
     }
 
     return {
@@ -205,6 +447,18 @@ class ReadLaterService {
       id: normalizedId,
       sourceGuid: existing.source_guid,
     };
+  }
+
+  getCodexStatus() {
+    return this.translationService.getCodexStatus();
+  }
+
+  isCodexProvider() {
+    return this.translationService.isCodexProvider();
+  }
+
+  probeCodex(options) {
+    return this.translationService.probeCodex(options);
   }
 
   normalizeMode(mode) {
@@ -264,7 +518,6 @@ class ReadLaterService {
       fallbackTitle: 'X Article',
     });
     const archivedHtmlPath = path.join(workspaceDir, 'article.html');
-    fs.writeFileSync(archivedHtmlPath, rendered.html, 'utf8');
 
     const cleanedContentHtml = cleanupStructuredContent(rendered.contentHtml);
     if (!cleanedContentHtml) {
@@ -301,6 +554,9 @@ class ReadLaterService {
         articleCookieFile: this.config.articleCookieFile,
         articleCookieDomain: this.config.articleCookieDomain,
         articleCookieHeader: this.config.articleCookieHeader,
+        maxBytes: this.config.articleMaxBytes,
+        maxRedirects: this.config.outboundMaxRedirects,
+        allowedHosts: this.config.outboundAllowedHosts,
       }
     );
 
@@ -311,15 +567,6 @@ class ReadLaterService {
     }
 
     const archivedHtmlPath = path.join(workspaceDir, 'article.html');
-    fs.writeFileSync(
-      archivedHtmlPath,
-      renderArchivedHtmlPage({
-        title: sourceTitle,
-        sourceUrl: url,
-        contentHtml,
-        provider: resolved.source,
-      })
-    );
 
     return {
       strategy: 'readability',
@@ -355,9 +602,59 @@ function cleanupStructuredContent(html) {
     .trim();
 }
 
-function renderArchivedHtmlPage({ title, sourceUrl, contentHtml, provider }) {
+function baseTranslationProvider(value) {
+  return String(value || 'readability').split('+')[0] || 'readability';
+}
+
+function nextReadLaterTranslationRetryAt(existingEntry, failedAt, providerRetryAfter) {
+  const delaysHours = [2, 6, 12, 24];
+  const failureCount = Number(existingEntry?.translation_failure_count || 0) + 1;
+  const localRetryAt = new Date(
+    new Date(failedAt).getTime() + delaysHours[Math.min(failureCount - 1, delaysHours.length - 1)] * 60 * 60 * 1000
+  );
+  const providerRetryAt = providerRetryAfter ? new Date(providerRetryAfter) : null;
+  return providerRetryAt && Number.isFinite(providerRetryAt.getTime()) && providerRetryAt > localRetryAt
+    ? providerRetryAt.toISOString()
+    : localRetryAt.toISOString();
+}
+
+function publicReadLaterError(error) {
+  if (!error) {
+    return '';
+  }
+  const message = String(error.message || 'translation failed');
+  if (/\/(?:Users|home|app)\/|[A-Za-z]:\\|auth file|\.codex/i.test(message)) {
+    return 'translation failed; see server logs for details';
+  }
+  return truncate(message, 500);
+}
+
+function isSameReadLaterEntryVersion(expected, current) {
+  if (!current || current.id !== expected.id) {
+    return false;
+  }
+  for (const field of [
+    'source_url',
+    'source_title',
+    'source_author',
+    'source_published_at',
+    'source_content_html',
+    'extracted_content_html',
+    'translated_title',
+    'translated_content_html',
+    'content_updated_at',
+    'updated_at',
+  ]) {
+    if ((current[field] ?? null) !== (expected[field] ?? null)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function renderArchivedHtmlPage({ title, sourceUrl, contentHtml, provider, language = 'en' }) {
   return `<!doctype html>
-<html lang="en" translate="yes">
+<html lang="${escapeHtml(language)}" translate="yes">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -434,4 +731,77 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function normalizeReadLaterUrl(value) {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(String(value || '').trim());
+  } catch {
+    throw new Error('url must be a valid HTTP(S) URL');
+  }
+  if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password) {
+    throw new Error('url must be a valid HTTP(S) URL without credentials');
+  }
+  parsedUrl.hash = '';
+  const url = parsedUrl.toString();
+  const xIdentity = X_HOSTS.has(parsedUrl.hostname.toLowerCase()) ? canonicalXIdentity(url) : null;
+  return {
+    url,
+    identity: xIdentity?.identity || url,
+  };
+}
+
+function replaceWorkspace(temporaryDir, finalDir) {
+  const previousDir = path.join(
+    path.dirname(finalDir),
+    `.${path.basename(finalDir)}.${randomUUID()}.previous`
+  );
+  const hadPrevious = fs.existsSync(finalDir);
+  if (hadPrevious) {
+    fs.renameSync(finalDir, previousDir);
+  }
+
+  try {
+    fs.renameSync(temporaryDir, finalDir);
+  } catch (error) {
+    if (hadPrevious) {
+      fs.renameSync(previousDir, finalDir);
+    }
+    throw error;
+  }
+
+  let settled = false;
+  return {
+    commit() {
+      if (settled) return;
+      settled = true;
+      if (hadPrevious) {
+        fs.rmSync(previousDir, { recursive: true, force: true });
+      }
+    },
+    rollback() {
+      if (settled) return;
+      settled = true;
+      fs.rmSync(finalDir, { recursive: true, force: true });
+      if (hadPrevious) {
+        fs.renameSync(previousDir, finalDir);
+      }
+    },
+  };
+}
+
+function cleanupStaleWorkspaces(storagePath) {
+  fs.mkdirSync(storagePath, { recursive: true, mode: 0o700 });
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const pattern = /^\.[0-9a-f]{64}\.[0-9a-f-]{36}\.(?:tmp|previous|delete)$/i;
+  for (const entry of fs.readdirSync(storagePath, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !pattern.test(entry.name)) {
+      continue;
+    }
+    const target = path.join(storagePath, entry.name);
+    if (fs.statSync(target).mtimeMs < cutoff) {
+      fs.rmSync(target, { recursive: true, force: true });
+    }
+  }
 }

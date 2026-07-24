@@ -1,15 +1,20 @@
 {
   "manifest_version": 3,
   "name": "NewRSS Read Later",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Save the current page into NewRSS Read Later with one click.",
   "permissions": [
     "activeTab",
+    "alarms",
     "notifications",
     "storage"
   ],
   "host_permissions": [
-    "http://macpro.sgponte:8787/*"
+    "http://newrss.local:8787/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
   ],
   "icons": {
     "16": "icon-16.png",
@@ -20,6 +25,10 @@
   "background": {
     "service_worker": "background.mjs",
     "type": "module"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
   },
   "action": {
     "default_icon": {

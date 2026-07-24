@@ -3,12 +3,14 @@ services:
     build: .
     container_name: newrss
     restart: unless-stopped
+    init: true
     ports:
-      - "8787:8787"
+      - "${HOST_PORT:-8787}:8787"
     env_file:
       - .env
     environment:
-      PORT: "${PORT:-8787}"
+      NODE_ENV: "production"
+      PORT: "8787"
       HOST: "0.0.0.0"
       DB_PATH: "/app/data/newrss.db"
       APP_BASE_URL: "${APP_BASE_URL:-}"
@@ -21,8 +23,16 @@ services:
       REFRESH_ON_BOOT: "${REFRESH_ON_BOOT:-true}"
       HTTP_TIMEOUT_MS: "${HTTP_TIMEOUT_MS:-15000}"
       UPSTREAM_PROXY_URL: "${UPSTREAM_PROXY_URL:-}"
+      BACKUP_OUTPUT_DIR: "/app/backups"
+      BACKUP_RETENTION_COUNT: "${BACKUP_RETENTION_COUNT:-7}"
     volumes:
       - ./data:/app/data
+      - "${BACKUP_HOST_DIR:-./backups}:/app/backups"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 20s
     healthcheck:
       test: ["CMD", "node", "scripts/healthcheck.js"]
       interval: 30s

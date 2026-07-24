@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22.13.0, 24.x]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm test
+      - if: matrix.node-version == '24.x'
+        run: npm run test:coverage
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - run: sudo install -d -o 1000 -g 1000 -m 0750 data data/codex-auth backups
+      - run: REFRESH_ON_BOOT=false docker compose up -d --build
+      - run: |
+          docker compose exec -T newrss sh -ec '
+            test "$(id -u)" = 1000
+            test -w /app/data
+            test -w /app/backups
+            auth_dir=${CODEX_AUTH_FILE%/*}
+            test -w "$auth_dir"
+            printf "%s\n" "{\"tokens\":{\"access_token\":\"before\",\"refresh_token\":\"before\"}}" > "$auth_dir/auth.json"
+            printf "%s\n" "{\"tokens\":{\"access_token\":\"after\",\"refresh_token\":\"after\"}}" > "$auth_dir/.auth.json.smoke.tmp"
+            mv "$auth_dir/.auth.json.smoke.tmp" "$auth_dir/auth.json"
+            node -e "JSON.parse(require(\"node:fs\").readFileSync(process.env.CODEX_AUTH_FILE, \"utf8\"))"
+          '
+      - run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8787/readyz; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs
+          exit 1
+      - if: always()
+        run: docker compose down --volumes
