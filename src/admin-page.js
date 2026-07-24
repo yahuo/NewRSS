@@ -82,6 +82,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         display: grid;
         grid-template-columns: minmax(280px, 360px) 1fr;
         gap: 20px;
+        align-items: start;
       }
       .card {
         background: var(--panel);
@@ -142,18 +143,107 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         font-size: 0.92rem;
       }
       .folder {
-        margin-bottom: 18px;
+        margin-bottom: 12px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.45);
       }
-      .folder h3 {
-        margin: 0 0 8px;
-        font-size: 1rem;
-        color: var(--muted);
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
+      .folder-summary {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+        min-height: 48px;
+        padding: 11px 14px;
+        cursor: pointer;
+        list-style: none;
+      }
+      .folder-summary::-webkit-details-marker {
+        display: none;
+      }
+      .folder-summary:focus-visible {
+        outline: 3px solid rgba(15, 92, 154, 0.24);
+        outline-offset: -3px;
+      }
+      .folder[open] .folder-summary {
+        border-bottom: 1px solid var(--line);
+        background: rgba(15, 92, 154, 0.035);
+      }
+      .folder-summary-main,
+      .folder-summary-meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+      }
+      .folder-summary-meta {
+        justify-content: flex-end;
+      }
+      .folder-name {
+        overflow: hidden;
+        font-weight: 700;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .folder-summary-action {
+        color: var(--accent);
+        font-size: 0.88rem;
+        white-space: nowrap;
+      }
+      .folder-summary-action-open {
+        display: none;
+      }
+      .folder[open] .folder-summary-action-closed {
+        display: none;
+      }
+      .folder[open] .folder-summary-action-open {
+        display: inline;
       }
       .feed-list {
         display: grid;
         gap: 12px;
+        padding: 12px;
+      }
+      .feed-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      .feed-search {
+        flex: 1 1 280px;
+      }
+      .feed-filters {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .feed-filter-button,
+      .feed-clear-button,
+      .feed-reset-button {
+        padding: 8px 12px;
+        box-shadow: none;
+      }
+      .feed-filter-button[aria-pressed="true"] {
+        border-color: rgba(15, 92, 154, 0.28);
+        background: rgba(15, 92, 154, 0.1);
+        color: var(--accent);
+      }
+      .feed-filter-button:focus-visible,
+      .feed-clear-button:focus-visible,
+      .feed-reset-button:focus-visible,
+      .feed-search:focus-visible {
+        outline: 3px solid rgba(15, 92, 154, 0.24);
+        outline-offset: 2px;
+      }
+      .feed-list-summary {
+        min-height: 24px;
+        margin-bottom: 10px;
+        color: var(--muted);
+        font-size: 0.9rem;
       }
       .feed-item {
         border: 1px solid var(--line);
@@ -434,6 +524,16 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         body { padding: 16px; }
         .layout { grid-template-columns: 1fr; }
       }
+      @media (max-width: 520px) {
+        .feed-search { flex-basis: 100%; }
+        .feed-filters { flex: 1 1 auto; }
+        .feed-filter-button { flex: 1 1 auto; }
+        .folder-summary {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 6px;
+        }
+        .folder-summary-meta { justify-content: flex-start; }
+      }
     </style>
   </head>
   <body>
@@ -582,6 +682,12 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         loading: true,
         error: '',
         open: false,
+      };
+      const feedListState = {
+        feeds: [],
+        query: '',
+        status: 'all',
+        openFolders: new Set(),
       };
       let currentReadLaterFeed = null;
       let readLaterSubmissionActive = false;
@@ -807,67 +913,179 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         const sourceFeeds = feeds.filter((feed) => !(feed.isManaged && feed.name === readLaterFeedName));
 
         currentReadLaterFeed = readLaterFeed;
+        feedListState.feeds = sourceFeeds.map((feed) => ({
+          ...feed,
+          folder: normalizeFolder(feed.folder),
+        }));
         syncExportFolders(sourceFeeds);
         renderReadLaterSection(readLaterFeed);
+        renderFeedList();
+        bindReadLaterControls();
+      }
 
-        const groups = new Map();
-        for (const feed of sourceFeeds) {
-          const folder = normalizeFolder(feed.folder);
-          const folderLabel = folder || '未分类';
-          if (!groups.has(folderLabel)) groups.set(folderLabel, []);
-          groups.get(folderLabel).push({ ...feed, folder });
+      function renderFeedList() {
+        if (!feedListState.feeds.length) {
+          root.innerHTML = '<div class="empty">还没有配置任何源。</div>';
+          return;
         }
 
-        root.innerHTML = sourceFeeds.length
-          ? Array.from(groups.entries()).map(([folder, items]) => {
-              return \`<section class="folder">
-                <h3>\${escapeHtml(folder)}</h3>
-                <div class="feed-list">
-                  \${items.map((feed) => {
-                    const statusClass = feed.lastRefreshStatus === 'error'
-                      ? 'pill danger'
-                      : feed.lastRefreshStatus === 'partial' || feed.lastRefreshStatus === 'refreshing'
-                        ? 'pill warn'
-                        : 'pill';
-                    const statusText = feed.lastRefreshStatus === 'error'
-                      ? '源失败'
-                      : feed.lastRefreshStatus === 'refreshing'
-                        ? '刷新中'
-                        : feed.lastRefreshStatus === 'partial'
-                          ? '部分失败'
-                          : feed.lastRefreshStatus === 'ok'
-                            ? '正常'
-                            : '未刷新';
-                    return \`<article class="feed-item">
-                      <header>
-                        <strong>\${escapeHtml(feed.title)}</strong>
-                        <span class="\${statusClass}">\${statusText}</span>
-                      </header>
-                      <div class="meta">
-                        <div>名称：\${escapeHtml(feed.name)}</div>
-                        <div>来源：\${feed.isManaged ? '本地导入' : \`<a href="\${escapeHtml(feed.sourceUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.sourceUrl)}</a>\`}</div>
-                        <div>Feed：<a href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.feedUrl)}</a></div>
-                        <div class="translation-row">
-                          <span>自动翻译英文内容：\${feed.translateEnabled ? '开启' : '关闭'}</span>
-                          <button class="switch-button \${feed.translateEnabled ? 'on' : ''}" type="button" role="switch" aria-checked="\${feed.translateEnabled ? 'true' : 'false'}" data-action="toggle-translate" data-name="\${escapeHtml(feed.name)}" data-source-url="\${escapeHtml(feed.sourceUrl)}" data-folder="\${escapeHtml(feed.folder || '')}" data-translate-enabled="\${feed.translateEnabled ? 'true' : 'false'}">\${feed.translateEnabled ? '关闭' : '开启'}</button>
-                        </div>
-                        <div>最近刷新：\${escapeHtml(feed.lastRefreshedAt || '未刷新')}</div>
-                        <div>已抓取：\${Number(feed.entryCount || 0)} 篇，最近失败：\${Number(feed.errorCount || 0)} 篇</div>
-                      </div>
-                      <div class="row-actions">
-                        \${feed.isManaged ? '' : \`<button type="button" data-action="refresh" data-name="\${escapeHtml(feed.name)}">刷新</button>\`}
-                        <a class="button-like" href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">查看 Feed</a>
-                        <button class="danger" type="button" data-action="delete" data-name="\${escapeHtml(feed.name)}">删除</button>
-                      </div>
-                      \${renderErrors(feed)}
-                    </article>\`;
-                  }).join('')}
-                </div>
-              </section>\`;
-            }).join('')
-          : '<div class="empty">还没有配置任何源。</div>';
+        root.innerHTML = \`<div class="feed-toolbar">
+          <input class="feed-search" type="search" data-role="feed-search" value="\${escapeHtml(feedListState.query)}" placeholder="搜索标题、名称、地址或目录" aria-label="搜索源" />
+          <div class="feed-filters" role="group" aria-label="按刷新状态筛选">
+            <button class="feed-filter-button" type="button" data-feed-status="all">全部</button>
+            <button class="feed-filter-button" type="button" data-feed-status="error">有错误</button>
+            <button class="feed-filter-button" type="button" data-feed-status="idle">未刷新</button>
+          </div>
+          <button class="feed-clear-button" type="button" data-role="feed-clear">清除</button>
+        </div>
+        <div class="feed-list-summary" data-role="feed-list-summary" role="status" aria-live="polite"></div>
+        <div data-role="feed-groups"></div>\`;
 
-        root.querySelectorAll('button[data-action]').forEach((button) => {
+        const searchInput = root.querySelector('[data-role="feed-search"]');
+        searchInput.addEventListener('input', () => {
+          feedListState.query = searchInput.value;
+          updateFeedFilterControls();
+          renderFeedGroups();
+        });
+        root.querySelectorAll('[data-feed-status]').forEach((button) => {
+          button.addEventListener('click', () => {
+            feedListState.status = button.dataset.feedStatus;
+            updateFeedFilterControls();
+            renderFeedGroups();
+          });
+        });
+        root.querySelector('[data-role="feed-clear"]').addEventListener('click', () => {
+          feedListState.query = '';
+          feedListState.status = 'all';
+          searchInput.value = '';
+          updateFeedFilterControls();
+          renderFeedGroups();
+          searchInput.focus();
+        });
+
+        updateFeedFilterControls();
+        renderFeedGroups();
+      }
+
+      function updateFeedFilterControls() {
+        root.querySelectorAll('[data-feed-status]').forEach((button) => {
+          const selected = button.dataset.feedStatus === feedListState.status;
+          button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+        });
+        const clearButton = root.querySelector('[data-role="feed-clear"]');
+        if (clearButton) {
+          clearButton.disabled = !hasActiveFeedFilters();
+        }
+      }
+
+      function renderFeedGroups() {
+        const groupsRoot = root.querySelector('[data-role="feed-groups"]');
+        const summary = root.querySelector('[data-role="feed-list-summary"]');
+        if (!groupsRoot || !summary) {
+          return;
+        }
+
+        const visibleFeeds = feedListState.feeds.filter((feed) => feedMatchesFilters(feed));
+        const filtersActive = hasActiveFeedFilters();
+        summary.textContent = filtersActive
+          ? \`显示 \${visibleFeeds.length} / \${feedListState.feeds.length} 个源\`
+          : \`共 \${feedListState.feeds.length} 个源\`;
+
+        const groups = new Map();
+        for (const feed of visibleFeeds) {
+          const folderLabel = feed.folder || '未分类';
+          if (!groups.has(folderLabel)) groups.set(folderLabel, []);
+          groups.get(folderLabel).push(feed);
+        }
+
+        groupsRoot.innerHTML = visibleFeeds.length
+          ? Array.from(groups.entries()).map(([folder, items]) => {
+              const errorCount = items.filter((feed) => hasFeedError(feed)).length;
+              const open = filtersActive || feedListState.openFolders.has(folder);
+              return \`<details class="folder" data-folder="\${escapeHtml(folder)}" \${open ? 'open' : ''}>
+                <summary class="folder-summary">
+                  <span class="folder-summary-main">
+                    <span class="folder-name">\${escapeHtml(folder)}</span>
+                    <span class="pill">\${items.length} 个源</span>
+                  </span>
+                  <span class="folder-summary-meta">
+                    \${errorCount ? \`<span class="pill danger">\${errorCount} 个异常</span>\` : ''}
+                    <span class="folder-summary-action" aria-hidden="true"><span class="folder-summary-action-closed">展开</span><span class="folder-summary-action-open">收起</span></span>
+                  </span>
+                </summary>
+                <div class="feed-list">\${items.map((feed) => renderFeedCard(feed)).join('')}</div>
+              </details>\`;
+            }).join('')
+          : \`<div class="empty">没有匹配的源。<div class="row-actions"><button class="feed-reset-button" type="button" data-role="feed-reset">清除筛选</button></div></div>\`;
+
+        groupsRoot.querySelectorAll('details.folder').forEach((details) => {
+          details.addEventListener('toggle', () => {
+            if (hasActiveFeedFilters()) {
+              return;
+            }
+            if (details.open) {
+              feedListState.openFolders.add(details.dataset.folder);
+            } else {
+              feedListState.openFolders.delete(details.dataset.folder);
+            }
+          });
+        });
+        groupsRoot.querySelector('[data-role="feed-reset"]')?.addEventListener('click', () => {
+          feedListState.query = '';
+          feedListState.status = 'all';
+          const searchInput = root.querySelector('[data-role="feed-search"]');
+          if (searchInput) {
+            searchInput.value = '';
+            searchInput.focus();
+          }
+          updateFeedFilterControls();
+          renderFeedGroups();
+        });
+        bindFeedActions(groupsRoot);
+      }
+
+      function renderFeedCard(feed) {
+        const statusClass = feed.lastRefreshStatus === 'error'
+          ? 'pill danger'
+          : feed.lastRefreshStatus === 'partial' || feed.lastRefreshStatus === 'refreshing'
+            ? 'pill warn'
+            : 'pill';
+        const statusText = feed.lastRefreshStatus === 'error'
+          ? '源失败'
+          : feed.lastRefreshStatus === 'refreshing'
+            ? '刷新中'
+            : feed.lastRefreshStatus === 'partial'
+              ? '部分失败'
+              : feed.lastRefreshStatus === 'ok'
+                ? '正常'
+                : '未刷新';
+        return \`<article class="feed-item">
+          <header>
+            <strong>\${escapeHtml(feed.title)}</strong>
+            <span class="\${statusClass}">\${statusText}</span>
+          </header>
+          <div class="meta">
+            <div>名称：\${escapeHtml(feed.name)}</div>
+            <div>来源：\${feed.isManaged ? '本地导入' : \`<a href="\${escapeHtml(feed.sourceUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.sourceUrl)}</a>\`}</div>
+            <div>Feed：<a href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">\${escapeHtml(feed.feedUrl)}</a></div>
+            <div class="translation-row">
+              <span>自动翻译英文内容：\${feed.translateEnabled ? '开启' : '关闭'}</span>
+              <button class="switch-button \${feed.translateEnabled ? 'on' : ''}" type="button" role="switch" aria-checked="\${feed.translateEnabled ? 'true' : 'false'}" data-action="toggle-translate" data-name="\${escapeHtml(feed.name)}" data-source-url="\${escapeHtml(feed.sourceUrl)}" data-folder="\${escapeHtml(feed.folder || '')}" data-translate-enabled="\${feed.translateEnabled ? 'true' : 'false'}">\${feed.translateEnabled ? '关闭' : '开启'}</button>
+            </div>
+            <div>最近刷新：\${escapeHtml(feed.lastRefreshedAt || '未刷新')}</div>
+            <div>已抓取：\${Number(feed.entryCount || 0)} 篇，最近失败：\${Number(feed.errorCount || 0)} 篇</div>
+          </div>
+          <div class="row-actions">
+            \${feed.isManaged ? '' : \`<button type="button" data-action="refresh" data-name="\${escapeHtml(feed.name)}">刷新</button>\`}
+            <a class="button-like" href="\${escapeHtml(feed.feedUrl)}" target="_blank" rel="noreferrer">查看 Feed</a>
+            <button class="danger" type="button" data-action="delete" data-name="\${escapeHtml(feed.name)}">删除</button>
+          </div>
+          \${renderErrors(feed)}
+        </article>\`;
+      }
+
+      function bindFeedActions(container) {
+        container.querySelectorAll('.feed-item button[data-action]').forEach((button) => {
           button.addEventListener('click', async () => {
             const action = button.dataset.action;
             const name = button.dataset.name;
@@ -910,7 +1128,33 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
             }
           });
         });
-        bindReadLaterControls();
+      }
+
+      function feedMatchesFilters(feed) {
+        const query = normalizeFeedQuery(feedListState.query);
+        if (query) {
+          const searchableText = [feed.title, feed.name, feed.sourceUrl, feed.feedUrl, feed.folder]
+            .map((value) => normalizeFeedQuery(value))
+            .join('\\n');
+          if (!searchableText.includes(query)) {
+            return false;
+          }
+        }
+        if (feedListState.status === 'error') {
+          return hasFeedError(feed);
+        }
+        if (feedListState.status === 'idle') {
+          return !feed.lastRefreshedAt || !feed.lastRefreshStatus || feed.lastRefreshStatus === 'idle';
+        }
+        return true;
+      }
+
+      function hasFeedError(feed) {
+        return Number(feed.errorCount || 0) > 0 || ['error', 'partial'].includes(feed.lastRefreshStatus);
+      }
+
+      function hasActiveFeedFilters() {
+        return Boolean(normalizeFeedQuery(feedListState.query)) || feedListState.status !== 'all';
       }
 
       function setStatus(message) {
@@ -1180,6 +1424,10 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         return String(value || '').trim().normalize('NFKC');
       }
 
+      function normalizeFeedQuery(value) {
+        return String(value || '').trim().normalize('NFKC').toLocaleLowerCase();
+      }
+
       async function readJsonResponse(response, fallbackMessage) {
         let data;
         try {
@@ -1219,7 +1467,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
       function normalizeFolder(value) {
         return String(value || '')
           .normalize('NFKC')
-          .replace(/[\s\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000\uFEFF]+/g, ' ')
+          .replace(/[\\s\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000\uFEFF]+/g, ' ')
           .replace(/[\\/]+/g, '/')
           .split('/')
           .map((segment) => segment.trim())

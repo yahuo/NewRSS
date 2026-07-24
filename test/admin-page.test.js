@@ -388,6 +388,151 @@ test('reloading feeds keeps the OPML folder selector in sync', async () => {
   );
 });
 
+test('admin feed folders start collapsed and summarize source and error counts', () => {
+  const dom = createAdminDom({
+    feeds: [
+      managedReadLaterFeed({ errorCount: 9 }),
+      sourceFeed('alpha', 'News'),
+      { ...sourceFeed('beta', 'News'), errorCount: 2 },
+      { ...sourceFeed('gamma', 'Tech'), lastRefreshStatus: 'partial' },
+      sourceFeed('quiet', 'Calm'),
+    ],
+    fetch: adminPageBootstrapFetch,
+  });
+  const folders = Array.from(dom.window.document.querySelectorAll('details.folder'));
+  const news = folders.find((folder) => folder.dataset.folder === 'News');
+  const tech = folders.find((folder) => folder.dataset.folder === 'Tech');
+  const calm = folders.find((folder) => folder.dataset.folder === 'Calm');
+
+  assert.equal(folders.length, 3);
+  assert.ok(folders.every((folder) => !folder.open));
+  assert.ok(news);
+  assert.equal(news.querySelector('.folder-name').textContent, 'News');
+  assert.equal(news.querySelector('.folder-summary-main .pill').textContent.trim(), '2 个源');
+  assert.equal(news.querySelector('.folder-summary-meta .pill.danger').textContent.trim(), '1 个异常');
+  assert.equal(tech.querySelector('.folder-summary-meta .pill.danger').textContent.trim(), '1 个异常');
+  assert.equal(calm.querySelector('.folder-summary-meta .pill.danger'), null);
+  assert.equal(dom.window.document.querySelector('[data-role="feed-list-summary"]').textContent, '共 4 个源');
+});
+
+test('admin feed search matches all supported fields without losing focus or folder state', () => {
+  const feeds = [
+    {
+      ...sourceFeed('alpha-name', 'News'),
+      title: 'Alpha Journal',
+      feedUrl: 'http://localhost:8787/feeds/output-only.xml',
+    },
+    { ...sourceFeed('beta-name', 'Products'), sourceUrl: 'https://example.com/beta.xml' },
+    { ...sourceFeed('gamma-name', 'Culture'), sourceUrl: 'https://feeds.example.com/gamma-path.xml' },
+    { ...sourceFeed('delta-name', 'Special Folder') },
+  ];
+  const dom = createAdminDom({ feeds, fetch: adminPageBootstrapFetch });
+  const document = dom.window.document;
+  const news = document.querySelector('details.folder[data-folder="News"]');
+  news.open = true;
+  news.dispatchEvent(new dom.window.Event('toggle'));
+
+  const search = document.querySelector('[data-role="feed-search"]');
+  search.focus();
+  const cases = [
+    ['ＡＬＰＨＡ', 'alpha-name'],
+    ['beta-name', 'beta-name'],
+    ['gamma-path', 'gamma-name'],
+    ['special folder', 'delta-name'],
+    ['output-only', 'alpha-name'],
+  ];
+  for (const [query, expectedName] of cases) {
+    search.value = query;
+    search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    assert.deepEqual(visibleFeedNames(document), [expectedName]);
+    assert.equal(document.activeElement, search);
+    assert.ok(document.querySelector('details.folder').open);
+  }
+
+  document.querySelector('[data-role="feed-clear"]').click();
+  assert.equal(document.querySelector('details.folder[data-folder="News"]').open, true);
+  assert.equal(document.querySelector('details.folder[data-folder="Special Folder"]').open, false);
+  assert.equal(search.value, '');
+
+  search.value = 'no-such-source';
+  search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  assert.match(document.querySelector('[data-role="feed-groups"] .empty').textContent, /没有匹配的源/);
+  document.querySelector('[data-role="feed-reset"]').click();
+  assert.deepEqual(visibleFeedNames(document), feeds.map((feed) => feed.name));
+  assert.equal(search.value, '');
+  assert.equal(document.querySelector('details.folder[data-folder="News"]').open, true);
+});
+
+test('admin feed status filters include article errors and feeds without a refresh timestamp', () => {
+  const refreshedAt = '2026-07-24T08:00:00.000Z';
+  const feeds = [
+    { ...sourceFeed('healthy', 'A'), lastRefreshedAt: refreshedAt },
+    { ...sourceFeed('source-error', 'A'), lastRefreshStatus: 'error', lastRefreshedAt: refreshedAt },
+    { ...sourceFeed('partial', 'B'), lastRefreshStatus: 'partial', lastRefreshedAt: refreshedAt },
+    { ...sourceFeed('article-error', 'B'), errorCount: 1, lastRefreshedAt: refreshedAt },
+    { ...sourceFeed('idle', 'C'), lastRefreshStatus: 'idle' },
+    sourceFeed('no-timestamp', 'C'),
+  ];
+  const dom = createAdminDom({ feeds, fetch: adminPageBootstrapFetch });
+  const document = dom.window.document;
+
+  document.querySelector('[data-feed-status="error"]').click();
+  assert.deepEqual(visibleFeedNames(document), ['source-error', 'partial', 'article-error']);
+  assert.equal(document.querySelector('[data-feed-status="error"]').getAttribute('aria-pressed'), 'true');
+
+  document.querySelector('[data-feed-status="idle"]').click();
+  assert.deepEqual(visibleFeedNames(document), ['idle', 'no-timestamp']);
+  assert.equal(document.querySelector('[data-feed-status="idle"]').getAttribute('aria-pressed'), 'true');
+
+  document.querySelector('[data-feed-status="all"]').click();
+  assert.deepEqual(visibleFeedNames(document), feeds.map((feed) => feed.name));
+  assert.equal(document.querySelector('[data-feed-status="all"]').getAttribute('aria-pressed'), 'true');
+});
+
+test('admin feed reload preserves search and manual folder state', async () => {
+  const refreshedAt = '2026-07-24T08:00:00.000Z';
+  const feeds = [
+    { ...sourceFeed('alpha', 'A'), lastRefreshedAt: refreshedAt },
+    { ...sourceFeed('beta', 'B'), lastRefreshedAt: refreshedAt },
+  ];
+  let feedReloads = 0;
+  const dom = createAdminDom({
+    feeds,
+    fetch: async (url, options = {}) => {
+      if (url === '/api/codex/status') {
+        return jsonResponse({ ok: false, error: 'inactive' }, 404);
+      }
+      if (String(url).startsWith('/api/read-later/items?')) {
+        return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+      }
+      if (url === '/api/feeds/beta/refresh' && options.method === 'POST') {
+        return jsonResponse({ ok: true });
+      }
+      if (url === '/api/feeds') {
+        feedReloads += 1;
+        return jsonResponse({ ok: true, feeds });
+      }
+      throw new Error('unexpected request: ' + url);
+    },
+  });
+  const document = dom.window.document;
+  const folderA = document.querySelector('details.folder[data-folder="A"]');
+  folderA.open = true;
+  folderA.dispatchEvent(new dom.window.Event('toggle'));
+
+  const search = document.querySelector('[data-role="feed-search"]');
+  search.value = 'beta';
+  search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  document.querySelector('[data-action="refresh"][data-name="beta"]').click();
+
+  await waitFor(() => feedReloads === 1 && document.querySelector('[data-role="feed-search"]')?.value === 'beta');
+  assert.equal(document.querySelector('details.folder[data-folder="B"]').open, true);
+
+  document.querySelector('[data-role="feed-clear"]').click();
+  assert.equal(document.querySelector('details.folder[data-folder="A"]').open, true);
+  assert.equal(document.querySelector('details.folder[data-folder="B"]').open, false);
+});
+
 test('OPML import rejects files over 2 MiB before reading or uploading', async () => {
   const requests = [];
   const dom = createAdminDom({
@@ -526,6 +671,11 @@ function sourceFeed(name, folder) {
     isManaged: false,
     items: [],
   };
+}
+
+function visibleFeedNames(document) {
+  return Array.from(document.querySelectorAll('.feed-item [data-action="refresh"]'))
+    .map((button) => button.dataset.name);
 }
 
 function readLaterItem(id) {
