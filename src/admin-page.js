@@ -335,12 +335,93 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         margin-bottom: 4px;
         color: var(--danger);
       }
+      .error-details {
+        padding: 0;
+        overflow: hidden;
+      }
+      .error-summary {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+        min-height: 44px;
+        padding: 12px 14px;
+        cursor: pointer;
+        list-style: none;
+      }
+      .error-summary::-webkit-details-marker {
+        display: none;
+      }
+      .error-summary:focus-visible {
+        outline: 3px solid rgba(154, 47, 47, 0.28);
+        outline-offset: -3px;
+      }
+      .error-summary-main {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        color: var(--danger);
+        font-weight: 700;
+      }
+      .error-summary-action {
+        color: var(--danger);
+        font-size: 0.88rem;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+      .error-summary-action-open {
+        display: none;
+      }
+      .error-details[open] .error-summary {
+        border-bottom: 1px solid rgba(154, 47, 47, 0.16);
+      }
+      .error-details[open] .error-summary-action-closed {
+        display: none;
+      }
+      .error-details[open] .error-summary-action-open {
+        display: inline;
+      }
+      .error-details-body {
+        padding: 12px 14px 14px;
+      }
       .error-list {
         margin: 0;
         padding-left: 18px;
       }
+      .error-list li {
+        overflow-wrap: anywhere;
+      }
       .error-list li + li {
-        margin-top: 6px;
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px solid rgba(154, 47, 47, 0.12);
+      }
+      .error-entry-title {
+        color: var(--ink);
+        font-weight: 600;
+      }
+      .error-entry-message {
+        margin-top: 3px;
+      }
+      .error-entry-meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0 12px;
+        margin-top: 2px;
+        font-size: 0.88rem;
+      }
+      .error-entry-link {
+        display: inline-flex;
+        align-items: center;
+        min-height: 44px;
+        color: var(--accent);
+      }
+      .error-list-hint {
+        margin: 8px 0 0;
+        font-size: 0.88rem;
       }
       .empty {
         color: var(--muted);
@@ -972,7 +1053,28 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
         }
 
         if (Array.isArray(feed.recentEntryErrors) && feed.recentEntryErrors.length) {
-          blocks.push(\`<div class="error-box"><strong>最近文章抓取失败</strong><ol class="error-list">\${feed.recentEntryErrors.map((entry) => \`<li><div>\${escapeHtml(entry.title)}</div><div>\${escapeHtml(entry.error || '未知错误')}</div><div>\${escapeHtml(entry.refreshedAt || '')}</div><div><a href="\${escapeHtml(entry.sourceUrl)}" target="_blank" rel="noreferrer">查看原文</a></div></li>\`).join('')}</ol></div>\`);
+          const recentErrors = feed.recentEntryErrors;
+          const recentCount = recentErrors.length;
+          const totalCount = Math.max(Number(feed.errorCount || 0), recentCount);
+          const isTruncated = totalCount > recentCount;
+          const countLabel = isTruncated ? \`最近 \${recentCount} 条\` : \`\${recentCount} 条\`;
+          const truncationHint = isTruncated
+            ? \`<p class="error-list-hint">共 \${totalCount} 篇文章失败，仅显示最近 \${recentCount} 篇。</p>\`
+            : '';
+          blocks.push(\`<details class="error-box error-details">
+            <summary class="error-summary">
+              <span class="error-summary-main">最近文章处理失败 <span class="pill danger">\${countLabel}</span></span>
+              <span class="error-summary-action" aria-hidden="true"><span class="error-summary-action-closed">展开</span><span class="error-summary-action-open">收起</span></span>
+            </summary>
+            <div class="error-details-body">
+              <ol class="error-list">\${recentErrors.map((entry) => \`<li>
+                <div class="error-entry-title">\${escapeHtml(entry.title)}</div>
+                <div class="error-entry-message">\${escapeHtml(entry.error || '未知错误')}</div>
+                <div class="error-entry-meta"><time datetime="\${escapeHtml(entry.refreshedAt || '')}">\${escapeHtml(entry.refreshedAt || '')}</time><a class="error-entry-link" href="\${escapeHtml(entry.sourceUrl)}" target="_blank" rel="noreferrer">查看原文</a></div>
+              </li>\`).join('')}</ol>
+              \${truncationHint}
+            </div>
+          </details>\`);
         }
 
         if (!blocks.length) {

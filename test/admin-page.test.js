@@ -73,6 +73,84 @@ test('admin feed list renders a per-feed translation switch', () => {
   assert.match(html, /translateEnabled: nextTranslateEnabled/);
 });
 
+test('admin page keeps recent article failures collapsed with accessible details', () => {
+  const feed = {
+    ...sourceFeed('wired', 'TECH'),
+    lastRefreshStatus: 'partial',
+    lastRefreshError: 'feed refresh partially failed',
+    errorCount: 2,
+    recentEntryErrors: [
+      {
+        id: 1,
+        title: 'Story <script>alert(1)</script>',
+        sourceUrl: 'https://example.com/story-1',
+        refreshedAt: '2026-07-24T01:02:03.000Z',
+        error: 'fetch failed <b>hard</b>',
+      },
+      {
+        id: 2,
+        title: 'Story two',
+        sourceUrl: 'https://example.com/story-2',
+        refreshedAt: '2026-07-24T02:03:04.000Z',
+        error: 'translation retry pending',
+      },
+    ],
+  };
+  const dom = createAdminDom({
+    feeds: [feed],
+    fetch: adminPageBootstrapFetch,
+  });
+  const feedItem = dom.window.document.querySelector('.feed-item');
+  const sourceError = feedItem.querySelector('.errors > .error-box:not(details)');
+  const details = feedItem.querySelector('details.error-box.error-details');
+
+  assert.equal(sourceError.textContent.trim(), '最近一次源级错误feed refresh partially failed');
+  assert.ok(details);
+  assert.equal(details.hasAttribute('open'), false);
+  assert.match(details.querySelector('summary').textContent, /最近文章处理失败/);
+  assert.equal(details.querySelector('.pill.danger').textContent.trim(), '2 条');
+  assert.equal(details.querySelectorAll('.error-list > li').length, 2);
+  assert.equal(details.querySelector('time').getAttribute('datetime'), '2026-07-24T01:02:03.000Z');
+  assert.match(details.textContent, /Story <script>alert\(1\)<\/script>/);
+  assert.match(details.textContent, /fetch failed <b>hard<\/b>/);
+  assert.equal(details.querySelector('script'), null);
+  const sourceLink = details.querySelector('a[href="https://example.com/story-1"]');
+  assert.equal(sourceLink.getAttribute('target'), '_blank');
+  assert.equal(sourceLink.getAttribute('rel'), 'noreferrer');
+  assert.equal(details.querySelector('.error-list-hint'), null);
+});
+
+test('admin page distinguishes total failures from the recent failure details', () => {
+  const feed = {
+    ...sourceFeed('wired', 'TECH'),
+    errorCount: 5,
+    recentEntryErrors: [
+      {
+        id: 1,
+        title: 'Story one',
+        sourceUrl: 'https://example.com/story-1',
+        refreshedAt: '2026-07-24T01:02:03.000Z',
+        error: 'fetch failed',
+      },
+      {
+        id: 2,
+        title: 'Story two',
+        sourceUrl: 'https://example.com/story-2',
+        refreshedAt: '2026-07-24T02:03:04.000Z',
+        error: 'translation retry pending',
+      },
+    ],
+  };
+  const dom = createAdminDom({
+    feeds: [feed],
+    fetch: adminPageBootstrapFetch,
+  });
+  const details = dom.window.document.querySelector('details.error-details');
+
+  assert.equal(details.querySelector('.pill.danger').textContent.trim(), '最近 2 条');
+  assert.equal(details.querySelector('.error-list-hint').textContent.trim(), '共 5 篇文章失败，仅显示最近 2 篇。');
+});
+
 test('admin page accepts a display title and renders an in-progress refresh status', async () => {
   const requests = [];
   const html = renderAdminPage({
@@ -386,6 +464,16 @@ function jsonResponse(data, status = 200) {
     status,
     json: async () => data,
   };
+}
+
+async function adminPageBootstrapFetch(url) {
+  if (url === '/api/codex/status') {
+    return jsonResponse({ ok: false, error: 'inactive' }, 404);
+  }
+  if (String(url).startsWith('/api/read-later/items?')) {
+    return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+  }
+  throw new Error(`unexpected request: ${url}`);
 }
 
 function installOpmlFormData(window, file) {
