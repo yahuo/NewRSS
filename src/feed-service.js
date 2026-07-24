@@ -54,6 +54,7 @@ class FeedService {
       maxRedirects: this.config.outboundMaxRedirects,
       upstreamProxyUrl: this.config.upstreamProxyUrl,
       allowedHosts: this.config.outboundAllowedHosts,
+      allowFakeIp: this.config.outboundAllowFakeIp,
     });
   }
 
@@ -387,6 +388,7 @@ class FeedService {
             maxBytes: this.config.articleMaxBytes,
             maxRedirects: this.config.outboundMaxRedirects,
             allowedHosts: this.config.outboundAllowedHosts,
+            allowFakeIp: this.config.outboundAllowFakeIp,
           });
       fetchedSource = !reuseFetchedSource;
 

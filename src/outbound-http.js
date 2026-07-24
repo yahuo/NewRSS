@@ -56,7 +56,7 @@ async function assertSafeOutboundUrl(rawUrl, options = {}) {
   }
 
   for (const record of records) {
-    assertPublicIpAddress(record.address, hostname);
+    assertPublicIpAddress(record.address, hostname, { allowFakeIp: options.allowFakeIp });
   }
 
   return parsedUrl;
@@ -81,7 +81,11 @@ async function fetchText(rawUrl, options = {}) {
   const ownedDispatcher = !proxyUrl && !options.dispatcher
     ? new Agent({
         connect: {
-          lookup: createSafeSocketLookup(options.lookup || dns.lookup, options.allowedHosts),
+          lookup: createSafeSocketLookup(
+            options.lookup || dns.lookup,
+            options.allowedHosts,
+            options.allowFakeIp
+          ),
         },
       })
     : null;
@@ -94,6 +98,7 @@ async function fetchText(rawUrl, options = {}) {
       const validatedUrl = await awaitWithAbort(
         assertSafeOutboundUrl(currentUrl, {
           allowedHosts: options.allowedHosts,
+          allowFakeIp: options.allowFakeIp,
           lookup: options.lookup,
         }),
         controller.signal
@@ -183,7 +188,7 @@ async function resolveHostRecords(hostname, lookup, lookupOptions = {}) {
   });
 }
 
-function createSafeSocketLookup(lookup, allowedHosts) {
+function createSafeSocketLookup(lookup, allowedHosts, allowFakeIp = false) {
   const allowed = normalizeAllowedHosts(allowedHosts);
   return (hostname, lookupOptions, callback) => {
     resolveHostRecords(hostname, lookup, lookupOptions)
@@ -191,7 +196,7 @@ function createSafeSocketLookup(lookup, allowedHosts) {
         const normalizedHostname = normalizeHostname(hostname);
         if (!allowed.has(normalizedHostname)) {
           for (const record of records) {
-            assertPublicIpAddress(record.address, normalizedHostname);
+            assertPublicIpAddress(record.address, normalizedHostname, { allowFakeIp });
           }
         }
 
@@ -213,11 +218,11 @@ function createSafeSocketLookup(lookup, allowedHosts) {
   };
 }
 
-function assertPublicIpAddress(address, hostname = '') {
+function assertPublicIpAddress(address, hostname = '', options = {}) {
   const normalizedAddress = stripIpv6Zone(address);
   const family = net.isIP(normalizedAddress);
   const blocked = family === 4
-    ? isBlockedIpv4(parseIpv4(normalizedAddress))
+    ? isBlockedIpv4(parseIpv4(normalizedAddress), options)
     : family === 6
       ? isBlockedIpv6(parseIpv6(normalizedAddress))
       : true;
@@ -227,7 +232,10 @@ function assertPublicIpAddress(address, hostname = '') {
   }
 }
 
-function isBlockedIpv4(value) {
+function isBlockedIpv4(value, { allowFakeIp = false } = {}) {
+  if (allowFakeIp && inCidr(value, FAKE_IP_V4_BASE, 15, 32)) {
+    return false;
+  }
   return IPV4_BLOCKS.some(({ base, prefix }) => inCidr(value, base, prefix, 32));
 }
 
@@ -487,6 +495,7 @@ const IPV4_BLOCKS = [
   ['224.0.0.0', 4],
   ['240.0.0.0', 4],
 ].map(([base, prefix]) => ({ base: parseIpv4(base), prefix }));
+const FAKE_IP_V4_BASE = parseIpv4('198.18.0.0');
 
 const IPV6_MAPPED_BASE = parseIpv6('::ffff:0:0');
 const IPV6_COMPATIBLE_BASE = parseIpv6('::');

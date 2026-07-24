@@ -68,6 +68,32 @@ test('allowedHosts is an exact private-host exception', async () => {
   );
 });
 
+test('fake-IP opt-in only permits hostname DNS results in 198.18.0.0/15', async () => {
+  const fakeIpLookup = async () => [{ address: '198.18.4.193', family: 4 }];
+  assert.equal(
+    (await assertSafeOutboundUrl('https://public.example/article', {
+      allowFakeIp: true,
+      lookup: fakeIpLookup,
+    })).hostname,
+    'public.example'
+  );
+  await assert.rejects(
+    assertSafeOutboundUrl('https://public.example/article', { lookup: fakeIpLookup }),
+    { code: 'OUTBOUND_ADDRESS_BLOCKED' }
+  );
+  await assert.rejects(
+    assertSafeOutboundUrl('http://198.18.4.193/article', { allowFakeIp: true }),
+    { code: 'OUTBOUND_ADDRESS_BLOCKED' }
+  );
+  await assert.rejects(
+    assertSafeOutboundUrl('http://private.example/article', {
+      allowFakeIp: true,
+      lookup: async () => [{ address: '192.168.1.10', family: 4 }],
+    }),
+    { code: 'OUTBOUND_ADDRESS_BLOCKED' }
+  );
+});
+
 test('fetchText revalidates every redirect and never fetches a blocked target', async () => {
   const fetched = [];
   const lookup = async (hostname) => [{

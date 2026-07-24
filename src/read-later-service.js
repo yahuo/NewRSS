@@ -557,6 +557,7 @@ class ReadLaterService {
         maxBytes: this.config.articleMaxBytes,
         maxRedirects: this.config.outboundMaxRedirects,
         allowedHosts: this.config.outboundAllowedHosts,
+        allowFakeIp: this.config.outboundAllowFakeIp,
       }
     );
 

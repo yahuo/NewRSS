@@ -68,6 +68,7 @@ const config = {
     .split(',')
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean),
+  outboundAllowFakeIp: process.env.OUTBOUND_ALLOW_FAKE_IP === 'true',
   feedRefreshConcurrency: boundedInteger('FEED_REFRESH_CONCURRENCY', 2, { min: 1, max: 8 }),
   itemRefreshConcurrency: boundedInteger('ITEM_REFRESH_CONCURRENCY', 3, { min: 1, max: 8 }),
   articleRecheckHours: boundedInteger('ARTICLE_RECHECK_HOURS', 24, { min: 1, max: 720 }),

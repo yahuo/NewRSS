@@ -38,3 +38,24 @@ test('refresh interval explicitly accepts zero as the disabled value', () => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, '0');
 });
+
+test('fake-IP compatibility is opt-in and only exact true enables it', () => {
+  for (const [value, expected] of [
+    ['true', 'true'],
+    ['false', 'false'],
+    ['1', 'false'],
+  ]) {
+    const result = spawnSync(
+      process.execPath,
+      ['-e', "process.stdout.write(String(require('./src/config').outboundAllowFakeIp))"],
+      {
+        cwd: projectRoot,
+        env: { ...process.env, OUTBOUND_ALLOW_FAKE_IP: value },
+        encoding: 'utf8',
+      }
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, expected);
+  }
+});

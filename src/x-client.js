@@ -268,6 +268,7 @@ async function fetchXText(url, config, headers) {
     maxRedirects: config?.outboundMaxRedirects,
     upstreamProxyUrl: config?.upstreamProxyUrl,
     allowedHosts: publicAllowedHosts(config),
+    allowFakeIp: config?.outboundAllowFakeIp,
     fetchImpl: config?.xFetchImpl ?? config?.fetchImpl,
     lookup: config?.xLookup ?? config?.lookup,
     dispatcher: config?.xDispatcher ?? config?.dispatcher,

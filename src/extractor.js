@@ -258,6 +258,7 @@ const fetchHtml = async (url, options, strategy) => {
     maxRedirects: options.maxRedirects,
     upstreamProxyUrl: options.upstreamProxyUrl,
     allowedHosts: options.allowedHosts,
+    allowFakeIp: options.allowFakeIp,
   });
 };
 
