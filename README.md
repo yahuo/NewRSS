@@ -55,7 +55,7 @@ npm install
 npm start
 ```
 
-需要 Node.js `^22.13.0` 或 `>=24.0.0`。
+需要 Node.js `^22.16.0` 或 `>=24.0.0`。
 
 默认地址：
 
@@ -369,7 +369,7 @@ npm run test:coverage
 npm audit --omit=dev --registry=https://registry.npmjs.org
 ```
 
-GitHub Actions 会在 Node 22.13 和 Node 24 上执行测试，并检查覆盖率、安全审计和 Docker 启动；Dependabot 每周检查 npm 与 Docker 更新。
+GitHub Actions 会在 Node 22.16 和 Node 24 上执行测试，并检查覆盖率、安全审计和 Docker 启动；Dependabot 每周检查 npm 与 Docker 更新。
 
 ## 当前限制
 
@@ -439,7 +439,7 @@ npm install
 npm start
 ```
 
-Requires Node.js `^22.13.0` or `>=24.0.0`.
+Requires Node.js `^22.16.0` or `>=24.0.0`.
 
 Default endpoints:
 
@@ -694,7 +694,7 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
 
 ## Local Verification
 
-Run `npm test`, `npm run test:coverage`, and `npm audit --omit=dev --registry=https://registry.npmjs.org`. GitHub Actions covers Node 22.13/24, coverage, audit, and a Docker smoke test; Dependabot checks npm and Docker weekly.
+Run `npm test`, `npm run test:coverage`, and `npm audit --omit=dev --registry=https://registry.npmjs.org`. GitHub Actions covers Node 22.16/24, coverage, audit, and a Docker smoke test; Dependabot checks npm and Docker weekly.
 
 ## Current Limitations
 
