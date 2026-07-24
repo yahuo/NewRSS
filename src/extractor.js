@@ -34,12 +34,16 @@ const looksLikeTruncatedContent = (html, text) => {
   return /(?:\u2026|\.{3})\s*$/.test(normalizedText);
 };
 
-const extractEmbeddedContent = (item) => {
+const extractEmbeddedContent = (item, strategy) => {
   const embedded = item['content:encoded'] || item.content || item.contentSnippet || '';
   const text = stripHtml(embedded);
   const textLength = text.length;
+  const truncated = looksLikeTruncatedContent(embedded, text);
+  const strategyAcceptsTruncatedContent = Boolean(
+    truncated && strategy?.acceptTruncatedEmbeddedContent?.(text)
+  );
 
-  if (textLength >= MIN_CONTENT_TEXT_LENGTH && !looksLikeTruncatedContent(embedded, text)) {
+  if (textLength >= MIN_CONTENT_TEXT_LENGTH && (!truncated || strategyAcceptsTruncatedContent)) {
     return {
       html: sanitizeHtml(embedded, { baseUrl: item.link || '' }),
       textLength,
@@ -298,7 +302,7 @@ const extractFromPage = async (url, options, strategy) => {
 
 const resolveArticleContent = async (item, options) => {
   const strategy = item.link ? getArticleStrategy(item.link) : null;
-  const embedded = extractEmbeddedContent(item);
+  const embedded = extractEmbeddedContent(item, strategy);
   if (embedded && !strategy?.preferPage) {
     return embedded;
   }

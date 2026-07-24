@@ -8,13 +8,21 @@ const {
   getArticleStrategy,
 } = require('../src/article-strategies');
 const { resolveArticleContent } = require('../src/extractor');
-const TEST_ALLOWED_HOSTS = ['www.newyorker.com', 'foreignpolicy.com', 'www.economist.com', 'www.nytimes.com'];
+const TEST_ALLOWED_HOSTS = [
+  'www.newyorker.com',
+  'foreignpolicy.com',
+  'www.economist.com',
+  'www.nytimes.com',
+  'hypebeast.com',
+  'example.com',
+];
 
-test('article strategies only match the four supported domains', () => {
+test('article strategies only match the five supported domains', () => {
   assert.equal(getArticleStrategy('https://www.economist.com/test').name, 'economist');
   assert.equal(getArticleStrategy('https://www.newyorker.com/test').name, 'new-yorker');
   assert.equal(getArticleStrategy('https://foreignpolicy.com/test').name, 'foreign-policy');
   assert.equal(getArticleStrategy('https://www.nytimes.com/test').name, 'new-york-times');
+  assert.equal(getArticleStrategy('https://hypebeast.com/test').name, 'hypebeast');
   assert.equal(getArticleStrategy('https://not-economist.com/test'), null);
   assert.equal(getArticleStrategy('https://example.com/test'), null);
 });
@@ -239,6 +247,105 @@ test('unmatched sites keep using complete RSS content without fetching the page'
     );
 
     assert.equal(result.source, 'rss');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('Hypebeast strategy accepts substantial RSS content ending with its publisher footer', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => {
+    throw new Error('unexpected page fetch');
+  };
+
+  try {
+    const result = await resolveArticleContent(
+      {
+        link: 'https://hypebeast.com/2026/7/test-article',
+        content: `
+          <p>${'Complete Hypebeast article paragraph. '.repeat(20)}</p>
+          <p><a href="https://hypebeast.com/2026/7/test-article">Read more at Hypebeast</a></p>
+        `,
+      },
+      {
+        timeoutMs: 5_000,
+        userAgent: 'NewRSS default user agent',
+        allowedHosts: TEST_ALLOWED_HOSTS,
+      }
+    );
+
+    assert.equal(result.source, 'rss');
+    assert.match(result.html, /Complete Hypebeast article paragraph/);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('Hypebeast strategy still fetches the page when its RSS content is too short', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response(`
+    <!doctype html>
+    <html>
+      <head><title>Fetched Hypebeast article</title></head>
+      <body>
+        <article>
+          <h1>Fetched Hypebeast article</h1>
+          <p>${'Complete fetched paragraph. '.repeat(30)}</p>
+        </article>
+      </body>
+    </html>
+  `, { status: 200 });
+
+  try {
+    const result = await resolveArticleContent(
+      {
+        link: 'https://hypebeast.com/2026/7/short-rss-item',
+        content: '<p>Short summary.</p><p>Read more at Hypebeast</p>',
+      },
+      {
+        timeoutMs: 5_000,
+        userAgent: 'NewRSS default user agent',
+        allowedHosts: TEST_ALLOWED_HOSTS,
+      }
+    );
+
+    assert.equal(result.source, 'readability');
+    assert.match(result.html, /Complete fetched paragraph/);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('other sites still treat substantial RSS content ending with read more as truncated', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response(`
+    <!doctype html>
+    <html>
+      <head><title>Fetched article</title></head>
+      <body>
+        <article>
+          <h1>Fetched article</h1>
+          <p>${'Complete fetched paragraph. '.repeat(30)}</p>
+        </article>
+      </body>
+    </html>
+  `, { status: 200 });
+
+  try {
+    const result = await resolveArticleContent(
+      {
+        link: 'https://example.com/article',
+        content: `<p>${'Long RSS summary. '.repeat(30)}</p><p>Read more</p>`,
+      },
+      {
+        timeoutMs: 5_000,
+        userAgent: 'NewRSS default user agent',
+        allowedHosts: TEST_ALLOWED_HOSTS,
+      }
+    );
+
+    assert.equal(result.source, 'readability');
+    assert.match(result.html, /Complete fetched paragraph/);
   } finally {
     global.fetch = originalFetch;
   }

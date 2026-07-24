@@ -1,6 +1,7 @@
 const ECONOMIST_USER_AGENT =
   'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.103 Mobile Safari/537.36 Liskov';
 const NYTIMES_USER_AGENT = 'Mozilla/5.0 (compatible; Google-InspectionTool/1.0)';
+const HYPEBEAST_RSS_FOOTER_PATTERN = /\bread more at hypebeast\s*$/i;
 
 const matchesDomain = (hostname, domain) =>
   hostname === domain || hostname.endsWith(`.${domain}`);
@@ -92,6 +93,11 @@ const ARTICLE_STRATEGIES = [
     preferPage: true,
     userAgent: NYTIMES_USER_AGENT,
     prepareDocument: removeNewYorkTimesAds,
+  },
+  {
+    name: 'hypebeast',
+    domain: 'hypebeast.com',
+    acceptTruncatedEmbeddedContent: (text) => HYPEBEAST_RSS_FOOTER_PATTERN.test(text),
   },
 ];
 
