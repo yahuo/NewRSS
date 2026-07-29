@@ -6,6 +6,7 @@ const { sanitizeHtml } = require('./html-sanitizer');
 const { renderMarkdown } = require('./markdown-renderer');
 const { canonicalXIdentity, importXUrl } = require('./x-importer');
 const TranslationService = require('./translation-service');
+const TranslationRequestPool = require('./translation-request-pool');
 const {
   buildManagedFeedSourceUrl,
   hashText,
@@ -19,11 +20,18 @@ const SUPPORTED_MODES = new Set(['auto', 'x-direct', 'readability']);
 const LEGACY_MODE_ALIASES = new Map([['x-markdown', 'x-direct']]);
 
 class ReadLaterService {
-  constructor({ db, config, feedService }) {
+  constructor({ db, config, feedService, translationRequestPool = null }) {
     this.db = db;
     this.config = config;
     this.feedService = feedService;
-    this.translationService = new TranslationService(buildReadLaterTranslationConfig(config), { db });
+    this.translationRequestPool =
+      translationRequestPool ||
+      feedService?.translationRequestPool ||
+      new TranslationRequestPool(config.translationRequestConcurrency);
+    this.translationService = new TranslationService(buildReadLaterTranslationConfig(config), {
+      db,
+      requestPool: this.translationRequestPool,
+    });
     this.activeSaves = new Map();
     this.saveChains = new Map();
     this.activeTranslationRetry = null;
@@ -289,83 +297,97 @@ class ReadLaterService {
   async retryDueTranslationsUnlocked(limit) {
     const feedName = this.config.readLaterFeedName;
     const entries = this.db.listDueReadLaterTranslationRetries(feedName, isoNow(), limit);
-    const results = [];
-    for (const entry of entries) {
-      const contentHtml = entry.extracted_content_html || entry.source_content_html || '';
-      if (!this.translationService.isEnabled()) {
-        results.push({ entryId: entry.id, status: 'deferred' });
-        continue;
-      }
-      if (!this.translationService.shouldTranslate({ title: entry.source_title, contentHtml })) {
-        this.db.clearEntryTranslationFailure(feedName, entry.source_guid);
-        results.push({ entryId: entry.id, status: 'skipped' });
-        continue;
-      }
-
-      try {
-        const translation = await this.translationService.translateArticle({
-          sourceTitle: entry.source_title || '',
-          contentHtml,
-          sourceUrl: entry.source_url,
-        });
-        if (!translation) {
-          results.push({ entryId: entry.id, status: 'deferred' });
-          continue;
+    const results = await mapWithConcurrency(
+      entries,
+      Math.max(1, Number(this.config.readLaterJobConcurrency) || 1),
+      async (entry) => {
+        try {
+          return await this.retryTranslationEntry(feedName, entry);
+        } catch (error) {
+          return {
+            entryId: entry.id,
+            status: 'error',
+            error: publicReadLaterError(error),
+          };
         }
-        const current = this.db.getEntryByFeedAndGuid(feedName, entry.source_guid);
-        if (!isSameReadLaterEntryVersion(entry, current)) {
-          results.push({ entryId: entry.id, status: 'superseded' });
-          continue;
-        }
-        const now = isoNow();
-        const translatedContentHtml = sanitizeHtml(translation.translatedContentHtml, {
-          baseUrl: entry.source_url,
-        });
-        this.db.upsertEntry({
-          feedName,
-          sourceGuid: entry.source_guid,
-          sourceUrl: entry.source_url,
-          sourceTitle: entry.source_title,
-          sourceAuthor: entry.source_author,
-          sourcePublishedAt: entry.source_published_at,
-          sourceContentHtml: entry.source_content_html,
-          extractedContentHtml: entry.extracted_content_html,
-          sourceFetchedAt: entry.source_fetched_at || entry.refreshed_at,
-          contentUpdatedAt: now,
-          translatedTitle: translation.translatedTitle,
-          translatedContentHtml,
-          articleExcerpt: truncate(stripHtml(translatedContentHtml || contentHtml), 240),
-          translationProvider: `${baseTranslationProvider(entry.translation_provider)}+${translation.provider}`,
-          refreshStatus: 'ok',
-          refreshError: '',
-          refreshedAt: now,
-          createdAt: entry.created_at,
-          updatedAt: now,
-        });
-        this.db.clearEntryTranslationFailure(feedName, entry.source_guid);
-        this.db.bumpFeedContentRevision(feedName, now);
-        this.db.setFeedRefreshResult(feedName, now, 'ok', '');
-        results.push({ entryId: entry.id, status: 'ok' });
-      } catch (error) {
-        const current = this.db.getEntryByFeedAndGuid(feedName, entry.source_guid);
-        if (!isSameReadLaterEntryVersion(entry, current)) {
-          results.push({ entryId: entry.id, status: 'superseded' });
-          continue;
-        }
-        const failedAt = isoNow();
-        const publicError = publicReadLaterError(error);
-        this.db.recordEntryTranslationFailure(
-          feedName,
-          entry.source_guid,
-          publicError,
-          failedAt,
-          nextReadLaterTranslationRetryAt(entry, failedAt, error.retryAfter)
-        );
-        this.db.setFeedRefreshResult(feedName, failedAt, 'partial', publicError);
-        results.push({ entryId: entry.id, status: 'error', error: publicError });
       }
+    );
+    const failed = results.find((result) => result.status === 'error');
+    if (failed) {
+      this.db.setFeedRefreshResult(feedName, isoNow(), 'partial', failed.error);
+    } else if (results.some((result) => result.status === 'ok')) {
+      this.db.setFeedRefreshResult(feedName, isoNow(), 'ok', '');
     }
     return results;
+  }
+
+  async retryTranslationEntry(feedName, entry) {
+    const contentHtml = entry.extracted_content_html || entry.source_content_html || '';
+    if (!this.translationService.isEnabled()) {
+      return { entryId: entry.id, status: 'deferred' };
+    }
+    if (!this.translationService.shouldTranslate({ title: entry.source_title, contentHtml })) {
+      this.db.clearEntryTranslationFailure(feedName, entry.source_guid);
+      return { entryId: entry.id, status: 'skipped' };
+    }
+
+    try {
+      const translation = await this.translationService.translateArticle({
+        sourceTitle: entry.source_title || '',
+        contentHtml,
+        sourceUrl: entry.source_url,
+      });
+      if (!translation) {
+        return { entryId: entry.id, status: 'deferred' };
+      }
+      const current = this.db.getEntryByFeedAndGuid(feedName, entry.source_guid);
+      if (!isSameReadLaterEntryVersion(entry, current)) {
+        return { entryId: entry.id, status: 'superseded' };
+      }
+      const now = isoNow();
+      const translatedContentHtml = sanitizeHtml(translation.translatedContentHtml, {
+        baseUrl: entry.source_url,
+      });
+      this.db.upsertEntry({
+        feedName,
+        sourceGuid: entry.source_guid,
+        sourceUrl: entry.source_url,
+        sourceTitle: entry.source_title,
+        sourceAuthor: entry.source_author,
+        sourcePublishedAt: entry.source_published_at,
+        sourceContentHtml: entry.source_content_html,
+        extractedContentHtml: entry.extracted_content_html,
+        sourceFetchedAt: entry.source_fetched_at || entry.refreshed_at,
+        contentUpdatedAt: now,
+        translatedTitle: translation.translatedTitle,
+        translatedContentHtml,
+        articleExcerpt: truncate(stripHtml(translatedContentHtml || contentHtml), 240),
+        translationProvider: `${baseTranslationProvider(entry.translation_provider)}+${translation.provider}`,
+        refreshStatus: 'ok',
+        refreshError: '',
+        refreshedAt: now,
+        createdAt: entry.created_at,
+        updatedAt: now,
+      });
+      this.db.clearEntryTranslationFailure(feedName, entry.source_guid);
+      this.db.bumpFeedContentRevision(feedName, now);
+      return { entryId: entry.id, status: 'ok' };
+    } catch (error) {
+      const current = this.db.getEntryByFeedAndGuid(feedName, entry.source_guid);
+      if (!isSameReadLaterEntryVersion(entry, current)) {
+        return { entryId: entry.id, status: 'superseded' };
+      }
+      const failedAt = isoNow();
+      const publicError = publicReadLaterError(error);
+      this.db.recordEntryTranslationFailure(
+        feedName,
+        entry.source_guid,
+        publicError,
+        failedAt,
+        nextReadLaterTranslationRetryAt(entry, failedAt, error.retryAfter)
+      );
+      return { entryId: entry.id, status: 'error', error: publicError };
+    }
   }
 
   listItems({ request, limit = 50 }) {
@@ -595,6 +617,20 @@ function buildReadLaterTranslationConfig(config) {
     ...config,
     translationProvider: provider,
   };
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 function cleanupStructuredContent(html) {

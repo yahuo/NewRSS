@@ -314,6 +314,10 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
   可选，设置后会自动把英文的 read-later 内容以及开启 `translateEnabled` 的 RSS 源内容翻译为中文
 - `GEMINI_MODEL`
   可选，Gemini 模型名，默认 `gemini-2.5-flash`
+- `GEMINI_CHUNK_CONCURRENCY`
+  单篇长文的 Gemini 分块并发数，默认 `3`
+- `TRANSLATION_REQUEST_CONCURRENCY`
+  Feed 与稍后读共享的单个翻译 provider 请求上限，默认 `6`；Codex 单篇长文最多使用其中 `3` 个槽
 - `CODEX_AUTH_FILE`
   可选，使用 `codex-oauth` 时读取并写回的 Codex auth 文件；直接运行默认 `~/.codex/auth.json`，Compose 示例使用专用的 `/app/data/codex-auth/auth.json`
 - `CODEX_MODEL`
@@ -649,6 +653,10 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
   Optional. When set, English read-later articles and feeds with `translateEnabled=true` are automatically translated
 - `GEMINI_MODEL`
   Optional Gemini model name, default `gemini-2.5-flash`
+- `GEMINI_CHUNK_CONCURRENCY`
+  Per-article Gemini chunk concurrency, default `3`
+- `TRANSLATION_REQUEST_CONCURRENCY`
+  Shared per-provider request limit across feeds and read-later, default `6`; one Codex article uses at most `3` of those slots
 - `CODEX_AUTH_FILE`
   Optional Codex auth file read and updated by `codex-oauth`; direct runs default to `~/.codex/auth.json`, while the Compose example uses dedicated `/app/data/codex-auth/auth.json`
 - `CODEX_MODEL`

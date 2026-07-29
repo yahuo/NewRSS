@@ -6,6 +6,7 @@ const path = require('node:path');
 
 const Database = require('../src/db');
 const TranslationService = require('../src/translation-service');
+const TranslationRequestPool = require('../src/translation-request-pool');
 const { buildHtmlTranslationPlan } = require('../src/html-chunker');
 
 test('codex-oauth provider uses the configured auth file and Responses API', async () => {
@@ -346,23 +347,304 @@ test('codex streaming completion usage is persisted and missing usage stays null
   assert.equal(recent[0].total_tokens, null);
 });
 
-test('codex chunk translation is serial and stops after the first failed chunk', async (t) => {
-  const fixture = createCodexFixture(t, { geminiChunkMaxWords: 5, geminiChunkConcurrency: 3 });
-  let fetchCount = 0;
+test('codex chunk translation runs concurrently within the shared request bound and preserves order', async (t) => {
+  const fixture = createCodexFixture(t, {
+    geminiChunkMaxWords: 200,
+    translationRequestConcurrency: 3,
+  });
+  let active = 0;
+  let maximumActive = 0;
+  const started = [];
   const previousFetch = global.fetch;
-  global.fetch = async () => {
-    fetchCount += 1;
-    return textResponse(JSON.stringify({ error: { message: 'temporary failure' } }), 500);
+  global.fetch = async (_url, options) => {
+    const prompt = JSON.parse(options.body).input[0].content[0].text;
+    const chunk = prompt.match(/Chunk: (\d+) of (\d+)/);
+    const kind = chunk ? `chunk-${chunk[1]}` : 'title';
+    started.push(kind);
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    try {
+      await abortableDelay(chunk ? 35 - Number(chunk[1]) * 3 : 25, options.signal);
+      const text = chunk
+        ? `<p data-chunk="${chunk[1]}">translated ${chunk[1]}</p>`
+        : '并发标题';
+      return textResponse(codexSse(text));
+    } finally {
+      active -= 1;
+    }
   };
   t.after(() => { global.fetch = previousFetch; });
 
   const service = new TranslationService(fixture.config, { db: fixture.db });
-  await assert.rejects(service.translateArticle({
+  const translated = await service.translateArticle({
     sourceTitle: 'A long English title for testing',
-    contentHtml: Array.from({ length: 8 }, (_, index) => `<p>Paragraph ${index} contains enough English words to require another chunk.</p>`).join(''),
     sourceUrl: 'https://example.com/chunked',
+    contentHtml: Array.from(
+      { length: 5 },
+      (_, chunkIndex) =>
+        `<p>${Array.from({ length: 190 }, (_, wordIndex) => `chunk${chunkIndex + 1}-word${wordIndex + 1}`).join(' ')}</p>`
+    ).join(''),
+  });
+
+  assert.equal(translated.translatedTitle, '并发标题');
+  assert.deepEqual(
+    Array.from(translated.translatedContentHtml.matchAll(/data-chunk="(\d+)"/g), (match) => Number(match[1])),
+    [1, 2, 3, 4, 5]
+  );
+  assert.deepEqual(started.slice(0, 3), ['title', 'chunk-1', 'chunk-2']);
+  assert.equal(maximumActive, 3);
+  assert.equal(active, 0);
+});
+
+test('codex chunk failure cancels active siblings and does not start queued work', async (t) => {
+  const fixture = createCodexFixture(t, { translationRequestConcurrency: 3 });
+  let active = 0;
+  let maximumActive = 0;
+  let cancelled = 0;
+  let calls = 0;
+  const previousFetch = global.fetch;
+  global.fetch = async (_url, options) => {
+    calls += 1;
+    const prompt = JSON.parse(options.body).input[0].content[0].text;
+    const chunk = prompt.match(/Chunk: (\d+) of (\d+)/);
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    try {
+      if (chunk?.[1] === '2') {
+        await abortableDelay(10, options.signal);
+        return textResponse(JSON.stringify({ error: { message: 'temporary failure' } }), 500);
+      }
+      await abortableDelay(200, options.signal);
+      return textResponse(codexSse(chunk ? `<p>${chunk[1]}</p>` : '标题'));
+    } catch (error) {
+      if (options.signal.aborted) {
+        cancelled += 1;
+      }
+      throw error;
+    } finally {
+      active -= 1;
+    }
+  };
+  t.after(() => { global.fetch = previousFetch; });
+
+  const service = new TranslationService(fixture.config, { db: fixture.db });
+  await assert.rejects(service.translateArticleInChunks({
+    sourceTitle: 'A long English title for testing',
+    sourceUrl: 'https://example.com/chunked',
+    htmlPlan: {
+      chunks: Array.from({ length: 8 }, (_, index) => `<p>chunk ${index + 1}</p>`),
+      wrap: (html) => html,
+    },
   }), /temporary failure/);
+
+  assert.equal(calls, 3);
+  assert.equal(maximumActive, 3);
+  assert.equal(cancelled, 2);
+  assert.equal(active, 0);
+  assert.deepEqual(
+    fixture.db
+      .getTranslationUsageSummary('codex-oauth')
+      .recent
+      .map((record) => record.status)
+      .sort(),
+    ['cancelled', 'cancelled', 'error']
+  );
+});
+
+test('codex timeout is recorded as an error rather than caller cancellation', async (t) => {
+  const fixture = createCodexFixture(t, { codexTimeoutMs: 10 });
+  const previousFetch = global.fetch;
+  global.fetch = async (_url, options) => {
+    await abortableDelay(200, options.signal);
+    return textResponse(codexSse('too late'));
+  };
+  t.after(() => { global.fetch = previousFetch; });
+
+  const service = new TranslationService(fixture.config, { db: fixture.db });
+  await assert.rejects(
+    service.translateTitle({ title: 'Timeout title', sourceUrl: '' }),
+    (error) => error?.name === 'AbortError'
+  );
+
+  const usage = fixture.db.getTranslationUsageSummary('codex-oauth');
+  assert.equal(usage.recent[0].status, 'error');
+  assert.equal(fixture.db.getTranslationCircuit('codex-oauth').state, 'closed');
+});
+
+test('queued codex requests recheck an opened circuit before fetching', async (t) => {
+  const fixture = createCodexFixture(t, { translationRequestConcurrency: 1 });
+  const requestPool = new TranslationRequestPool(1);
+  let fetchCount = 0;
+  const previousFetch = global.fetch;
+  global.fetch = async () => {
+    fetchCount += 1;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return textResponse(JSON.stringify({ detail: 'The usage limit has been reached' }), 429);
+  };
+  t.after(() => { global.fetch = previousFetch; });
+
+  const service = new TranslationService(fixture.config, {
+    db: fixture.db,
+    requestPool,
+  });
+  const settled = await Promise.allSettled([
+    service.translateTitle({ title: 'First title', sourceUrl: '' }),
+    service.translateTitle({ title: 'Second title', sourceUrl: '' }),
+  ]);
+
+  assert.equal(settled[0].status, 'rejected');
+  assert.equal(settled[0].reason.code, 'CODEX_USAGE_LIMIT');
+  assert.equal(settled[1].status, 'rejected');
+  assert.equal(settled[1].reason.code, 'CODEX_CIRCUIT_OPEN');
   assert.equal(fetchCount, 1);
+  assert.equal(fixture.db.getTranslationCircuit('codex-oauth').failure_count, 1);
+});
+
+test('concurrent codex usage limits retain the longest retry-after without multiplying failures', async (t) => {
+  const fixture = createCodexFixture(t, { translationRequestConcurrency: 2 });
+  let calls = 0;
+  const previousFetch = global.fetch;
+  global.fetch = async () => {
+    calls += 1;
+    const call = calls;
+    await new Promise((resolve) => setTimeout(resolve, call === 1 ? 5 : 15));
+    return new Response(JSON.stringify({ detail: 'The usage limit has been reached' }), {
+      status: 429,
+      headers: call === 2 ? { 'retry-after': '3600' } : {},
+    });
+  };
+  t.after(() => { global.fetch = previousFetch; });
+
+  const service = new TranslationService(fixture.config, { db: fixture.db });
+  const startedAt = Date.now();
+  const settled = await Promise.allSettled([
+    service.translateTitle({ title: 'First title', sourceUrl: '' }),
+    service.translateTitle({ title: 'Second title', sourceUrl: '' }),
+  ]);
+  assert.deepEqual(settled.map((result) => result.status), ['rejected', 'rejected']);
+
+  const circuit = fixture.db.getTranslationCircuit('codex-oauth');
+  assert.equal(circuit.failure_count, 1);
+  assert.ok(new Date(circuit.next_probe_at).getTime() >= startedAt + 3_590_000);
+});
+
+test('queued codex requests resolve OAuth credentials only after admission', async (t) => {
+  const fixture = createCodexFixture(t, { translationRequestConcurrency: 1 });
+  const requestPool = new TranslationRequestPool(1);
+  let releaseBlocker;
+  let markBlockerStarted;
+  const blockerStarted = new Promise((resolve) => {
+    markBlockerStarted = resolve;
+  });
+  const blocker = requestPool.run('codex-oauth', () => {
+    markBlockerStarted();
+    return new Promise((resolve) => {
+      releaseBlocker = resolve;
+    });
+  });
+  await blockerStarted;
+
+  let authorization = '';
+  const previousFetch = global.fetch;
+  global.fetch = async (_url, options) => {
+    authorization = options.headers.authorization;
+    return textResponse(codexSse('轮换后标题'));
+  };
+  t.after(() => { global.fetch = previousFetch; });
+  const service = new TranslationService(fixture.config, {
+    db: fixture.db,
+    requestPool,
+  });
+  const translating = service.translateTitle({ title: 'Queued title', sourceUrl: '' });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const rotatedAccessToken = fakeJwt({ exp: Math.floor(Date.now() / 1000) + 7200 });
+  fs.writeFileSync(fixture.config.codexAuthFile, JSON.stringify({
+    tokens: {
+      access_token: rotatedAccessToken,
+      refresh_token: 'rotated-refresh-token',
+    },
+  }));
+  releaseBlocker();
+
+  assert.equal(await translating, '轮换后标题');
+  await blocker;
+  assert.equal(authorization, `Bearer ${rotatedAccessToken}`);
+});
+
+test('forced codex probe bypasses a saturated translation pool', async (t) => {
+  const fixture = createCodexFixture(t, { translationRequestConcurrency: 1 });
+  const requestPool = new TranslationRequestPool(1);
+  let releaseBlocker;
+  let markBlockerStarted;
+  const blockerStarted = new Promise((resolve) => {
+    markBlockerStarted = resolve;
+  });
+  const blocker = requestPool.run('codex-oauth', () => {
+    markBlockerStarted();
+    return new Promise((resolve) => {
+      releaseBlocker = resolve;
+    });
+  });
+  await blockerStarted;
+
+  let fetchCount = 0;
+  const previousFetch = global.fetch;
+  global.fetch = async () => {
+    fetchCount += 1;
+    return textResponse(codexSse('OK'));
+  };
+  t.after(() => { global.fetch = previousFetch; });
+  const service = new TranslationService(fixture.config, {
+    db: fixture.db,
+    requestPool,
+  });
+
+  const result = await service.probeCodex({ force: true });
+  assert.equal(result.ok, true);
+  assert.equal(fetchCount, 1);
+  releaseBlocker();
+  await blocker;
+});
+
+test('successful probe does not close a circuit opened by an in-flight translation', async (t) => {
+  const fixture = createCodexFixture(t, { translationRequestConcurrency: 1 });
+  let releaseProbe;
+  let markProbeStarted;
+  const probeStarted = new Promise((resolve) => {
+    markProbeStarted = resolve;
+  });
+  const previousFetch = global.fetch;
+  global.fetch = async (_url, options) => {
+    const prompt = JSON.parse(options.body).input[0].content[0].text;
+    if (prompt === 'Reply OK.') {
+      markProbeStarted();
+      await new Promise((resolve) => {
+        releaseProbe = resolve;
+      });
+      return textResponse(codexSse('OK'));
+    }
+    return textResponse(JSON.stringify({ detail: 'The usage limit has been reached' }), 429);
+  };
+  t.after(() => { global.fetch = previousFetch; });
+  const service = new TranslationService(fixture.config, { db: fixture.db });
+
+  const probe = service.probeCodex({ force: true });
+  await probeStarted;
+  await assert.rejects(
+    service.translateTitle({ title: 'Open while probing', sourceUrl: '' }),
+    /usage limit/
+  );
+  assert.equal(fixture.db.getTranslationCircuit('codex-oauth').state, 'open');
+
+  releaseProbe();
+  const result = await probe;
+  assert.equal(result.ok, false);
+  assert.match(result.error, /circuit changed/);
+  const circuit = fixture.db.getTranslationCircuit('codex-oauth');
+  assert.equal(circuit.state, 'open');
+  assert.equal(circuit.failure_count, 1);
+  assert.equal(circuit.probe_in_progress, 0);
 });
 
 test('manual probe from closed does not block translations and a transient failure restores closed', async (t) => {
@@ -402,6 +684,68 @@ test('interrupted half-open probe is recoverable immediately after database rest
   assert.ok(recovered.next_probe_at <= new Date().toISOString());
 });
 
+test('expired probe claims are reclaimed without letting the old owner mutate the new claim', (t) => {
+  const fixture = createCodexFixture(t);
+  const oldStartedAt = new Date(Date.now() - 30_000).toISOString();
+  const abandonedBefore = new Date(Date.now() - 20_000).toISOString();
+  const newStartedAt = new Date().toISOString();
+  const initiallyDueAt = new Date(new Date(oldStartedAt).getTime() - 1_000).toISOString();
+
+  for (const scenario of [
+    { provider: 'codex-forced', force: true },
+    { provider: 'codex-scheduled', force: false },
+  ]) {
+    if (!scenario.force) {
+      fixture.db.openTranslationCircuit(
+        scenario.provider,
+        'usage limit',
+        oldStartedAt,
+        initiallyDueAt
+      );
+    }
+    const oldClaim = fixture.db.claimTranslationProbe(
+      scenario.provider,
+      oldStartedAt,
+      scenario.force
+    );
+    assert.equal(oldClaim.claimed, true);
+
+    if (scenario.force) {
+      fixture.db.openTranslationCircuit(
+        scenario.provider,
+        'usage limit',
+        oldStartedAt,
+        initiallyDueAt
+      );
+    }
+    const newClaim = fixture.db.claimTranslationProbe(
+      scenario.provider,
+      newStartedAt,
+      false,
+      abandonedBefore
+    );
+    assert.equal(newClaim.claimed, true);
+    assert.equal(fixture.db.getTranslationCircuit(scenario.provider).last_probe_at, newStartedAt);
+
+    const staleCompletion = fixture.db.completeTranslationProbe(
+      scenario.provider,
+      oldStartedAt,
+      new Date().toISOString()
+    );
+    assert.equal(staleCompletion.completed, false);
+    fixture.db.releaseTranslationProbe(scenario.provider, oldStartedAt, new Date().toISOString());
+    assert.equal(fixture.db.getTranslationCircuit(scenario.provider).probe_in_progress, 1);
+
+    const completion = fixture.db.completeTranslationProbe(
+      scenario.provider,
+      newStartedAt,
+      new Date().toISOString()
+    );
+    assert.equal(completion.completed, true);
+    assert.equal(completion.circuit.state, 'closed');
+  }
+});
+
 test('concurrent manual probe reports that no probe was started', async (t) => {
   const fixture = createCodexFixture(t);
   fixture.db.openTranslationCircuit(
@@ -420,7 +764,7 @@ test('probe claim is released when circuit state persistence fails', async (t) =
   const previousFetch = global.fetch;
   global.fetch = async () => textResponse('event: response.output_text.done\ndata: {"type":"response.output_text.done","text":"OK"}\n\n');
   t.after(() => { global.fetch = previousFetch; });
-  fixture.db.closeTranslationCircuit = () => { throw new Error('state write failed'); };
+  fixture.db.completeTranslationProbe = () => { throw new Error('state write failed'); };
   const service = new TranslationService(fixture.config, { db: fixture.db });
 
   await assert.rejects(service.probeCodex({ force: true }), /state write failed/);
@@ -513,6 +857,32 @@ function textResponse(text, status = 200) {
   };
 }
 
+function codexSse(text) {
+  return `event: response.output_text.done\ndata: ${JSON.stringify({
+    type: 'response.output_text.done',
+    text,
+  })}\n\n`;
+}
+
+function abortableDelay(delayMs, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, delayMs);
+    signal?.addEventListener('abort', aborted, { once: true });
+
+    function done() {
+      signal?.removeEventListener('abort', aborted);
+      resolve();
+    }
+
+    function aborted() {
+      clearTimeout(timer);
+      reject(signal?.reason instanceof Error
+        ? signal.reason
+        : new DOMException('The operation was aborted', 'AbortError'));
+    }
+  });
+}
+
 function fakeJwt(payload) {
   return ['header', base64Url(JSON.stringify(payload)), 'signature'].join('.');
 }
@@ -549,6 +919,7 @@ function createCodexFixture(t, overrides = {}) {
       codexTimeoutMs: 5000,
       geminiChunkMaxWords: 2000,
       geminiChunkConcurrency: 3,
+      translationRequestConcurrency: 3,
       translateTargetLanguage: 'Simplified Chinese',
       ...overrides,
     },

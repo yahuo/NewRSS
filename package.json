@@ -7,6 +7,7 @@
     "start": "node --disable-warning=ExperimentalWarning src/server.js",
     "dev": "node --watch --disable-warning=ExperimentalWarning src/server.js",
     "backup:database": "node --disable-warning=ExperimentalWarning scripts/backup-database.js",
+    "benchmark:translation": "node scripts/benchmark-translation-throughput.js",
     "export:entry": "node --disable-warning=ExperimentalWarning scripts/export-entry.js",
     "test": "node --test",
     "test:coverage": "node --test --experimental-test-coverage \"--test-coverage-exclude=test/**\" --test-coverage-lines=70 --test-coverage-functions=70 --test-coverage-branches=70"

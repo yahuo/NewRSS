@@ -4,6 +4,7 @@ const path = require('node:path');
 const { buildHtmlTranslationPlan } = require('./html-chunker');
 const { renderMarkdown } = require('./markdown-renderer');
 const { chunkMarkdown } = require('./markdown-chunker');
+const TranslationRequestPool = require('./translation-request-pool');
 const { extractMarkdownHeadingTitle, normalizeDerivedTitle, normalizeWhitespace, stripHtml, truncate } = require('./utils');
 
 const ENGLISH_SAMPLE_LIMIT = 6_000;
@@ -12,12 +13,20 @@ const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120;
 const CODEX_PROVIDER = 'codex-oauth';
+const CODEX_CHUNK_CONCURRENCY = 3;
+const CODEX_PROBE_LEASE_GRACE_MS = 5_000;
 const CODEX_PROBE_DELAYS_MINUTES = [15, 30, 60, 120];
 const codexAuthRefreshes = new Map();
 
 class TranslationService {
-  constructor(config, { db = null } = {}) {
-    this.config = { ...config, translationStore: db };
+  constructor(config, { db = null, requestPool = null } = {}) {
+    this.requestPool =
+      requestPool || new TranslationRequestPool(config.translationRequestConcurrency);
+    this.config = {
+      ...config,
+      translationStore: db,
+      translationRequestPool: this.requestPool,
+    };
   }
 
   isEnabled() {
@@ -164,9 +173,10 @@ class TranslationService {
     };
   }
 
-  async translateTitle({ title, sourceUrl }) {
+  async translateTitle({ title, sourceUrl, signal }) {
     const text = await callTranslationText({
       config: this.config,
+      signal,
       prompt: [
         `Translate the following article title into ${this.config.translateTargetLanguage}.`,
         'Return only the translated title on a single line.',
@@ -202,27 +212,38 @@ class TranslationService {
       return null;
     }
 
-    const translatedChunks = await mapWithConcurrency(
-      htmlPlan.chunks,
+    const tasks = [
+      ...(sourceTitle ? [{ type: 'title' }] : []),
+      ...htmlPlan.chunks.map((chunkHtml, index) => ({
+        type: 'chunk',
+        chunkHtml,
+        chunkIndex: index,
+      })),
+    ];
+    const translated = await mapWithConcurrency(
+      tasks,
       getChunkConcurrency(this.config),
-      (chunkHtml, index, signal) =>
-        this.translateHtmlChunk({
-          sourceTitle,
-          sourceUrl,
-          chunkHtml,
-          chunkIndex: index,
-          chunkCount: htmlPlan.chunks.length,
-          signal,
-        })
-    );
-
-    const translatedTitle =
-      (sourceTitle
-        ? await this.translateTitle({
+      (task, _index, signal) => {
+        if (task.type === 'title') {
+          return this.translateTitle({
             title: sourceTitle,
             sourceUrl,
-          })
-        : '') || normalizeDerivedTitle(sourceTitle);
+            signal,
+          });
+        }
+        return this.translateHtmlChunk({
+          sourceTitle,
+          sourceUrl,
+          chunkHtml: task.chunkHtml,
+          chunkIndex: task.chunkIndex,
+          chunkCount: htmlPlan.chunks.length,
+          signal,
+        });
+      }
+    );
+
+    const translatedTitle = (sourceTitle ? translated[0] : '') || normalizeDerivedTitle(sourceTitle);
+    const translatedChunks = sourceTitle ? translated.slice(1) : translated;
     const translatedContentHtml = htmlPlan.wrap(translatedChunks.join('\n\n'));
 
     return {
@@ -272,8 +293,17 @@ class TranslationService {
       throw new Error('Codex circuit persistence is unavailable');
     }
 
-    const now = new Date().toISOString();
-    const claim = this.config.translationStore.claimTranslationProbe(CODEX_PROVIDER, now, force);
+    const startedAt = new Date();
+    const now = startedAt.toISOString();
+    const abandonedBefore = new Date(
+      startedAt.getTime() - getCodexTimeoutMs(this.config) * 2 - CODEX_PROBE_LEASE_GRACE_MS
+    ).toISOString();
+    const claim = this.config.translationStore.claimTranslationProbe(
+      CODEX_PROVIDER,
+      now,
+      force,
+      abandonedBefore
+    );
     if (!claim.claimed) {
       return {
         probed: false,
@@ -286,16 +316,31 @@ class TranslationService {
     try {
       try {
         await callCodexText({ config: this.config, prompt: 'Reply OK.', probe: true });
-        const circuit = this.config.translationStore.closeTranslationCircuit(CODEX_PROVIDER, new Date().toISOString());
-        return { probed: true, ok: true, circuit };
+        const completion = this.config.translationStore.completeTranslationProbe(
+          CODEX_PROVIDER,
+          now,
+          new Date().toISOString()
+        );
+        return completion.completed
+          ? { probed: true, ok: true, circuit: completion.circuit }
+          : {
+              probed: true,
+              ok: false,
+              error: 'Codex circuit changed while the probe was running',
+              circuit: completion.circuit,
+            };
       } catch (error) {
         const circuit = isCodexUsageLimitError(error) || claim.circuit.state !== 'closed'
           ? openCodexCircuit(this.config, error)
-          : this.config.translationStore.closeTranslationCircuit(CODEX_PROVIDER, new Date().toISOString());
+          : this.config.translationStore.completeTranslationProbe(
+              CODEX_PROVIDER,
+              now,
+              new Date().toISOString()
+            ).circuit;
         return { probed: true, ok: false, error: error.message, circuit };
       }
     } finally {
-      this.config.translationStore.releaseTranslationProbe(CODEX_PROVIDER, new Date().toISOString());
+      this.config.translationStore.releaseTranslationProbe(CODEX_PROVIDER, now, new Date().toISOString());
     }
   }
 }
@@ -315,7 +360,10 @@ function getTranslationModel(config) {
 
 function getChunkConcurrency(config) {
   if (getTranslationProvider(config) === CODEX_PROVIDER) {
-    return 1;
+    return Math.min(
+      CODEX_CHUNK_CONCURRENCY,
+      Math.max(1, Number(config.translationRequestConcurrency) || CODEX_CHUNK_CONCURRENCY)
+    );
   }
   return Math.max(1, Number(config.geminiChunkConcurrency) || 3);
 }
@@ -326,12 +374,7 @@ async function callTranslationJson({ config, prompt }) {
     return parseTranslationJson(text);
   }
 
-  return callGemini({
-    apiKey: config.geminiApiKey,
-    model: config.geminiModel,
-    timeoutMs: config.geminiTimeoutMs,
-    prompt,
-  });
+  return callGemini({ config, prompt });
 }
 
 async function callTranslationText({ config, prompt, signal }) {
@@ -339,74 +382,68 @@ async function callTranslationText({ config, prompt, signal }) {
     return callCodexText({ config, prompt, signal });
   }
 
-  return callGeminiText({
-    apiKey: config.geminiApiKey,
-    model: config.geminiModel,
-    timeoutMs: config.geminiTimeoutMs,
-    prompt,
-    signal,
+  return callGeminiText({ config, prompt, signal });
+}
+
+async function fetchGeminiContent({ config, prompt, generationConfig = {}, signal }) {
+  return runTranslationRequest(config, 'gemini', signal, async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Number(config.geminiTimeoutMs) || 90_000);
+    const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
+
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.geminiModel)}:generateContent`,
+        {
+          method: 'POST',
+          signal: requestSignal,
+          headers: {
+            'content-type': 'application/json',
+            'x-goog-api-key': config.geminiApiKey,
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: 'user',
+                parts: [{ text: prompt }],
+              },
+            ],
+            generationConfig: {
+              temperature: 0.2,
+              ...generationConfig,
+            },
+          }),
+        }
+      );
+
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const message =
+          payload?.error?.message ||
+          payload?.error?.status ||
+          `Gemini request failed with status ${response.status}`;
+        throw new Error(message);
+      }
+
+      const parts = payload?.candidates?.[0]?.content?.parts || [];
+      const text = parts
+        .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+        .join('')
+        .trim();
+      if (!text) {
+        throw new Error('Gemini returned no text');
+      }
+
+      return text;
+    } finally {
+      clearTimeout(timer);
+    }
   });
 }
 
-async function fetchGeminiContent({ apiKey, model, timeoutMs, prompt, generationConfig = {}, signal }) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Number(timeoutMs) || 90_000);
-  const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
-
-  try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      {
-        method: 'POST',
-        signal: requestSignal,
-        headers: {
-          'content-type': 'application/json',
-          'x-goog-api-key': apiKey,
-        },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: prompt }],
-            },
-          ],
-          generationConfig: {
-            temperature: 0.2,
-            ...generationConfig,
-          },
-        }),
-      }
-    );
-
-    const payload = await response.json().catch(() => null);
-    if (!response.ok) {
-      const message =
-        payload?.error?.message ||
-        payload?.error?.status ||
-        `Gemini request failed with status ${response.status}`;
-      throw new Error(message);
-    }
-
-    const parts = payload?.candidates?.[0]?.content?.parts || [];
-    const text = parts
-      .map((part) => (typeof part?.text === 'string' ? part.text : ''))
-      .join('')
-      .trim();
-    if (!text) {
-      throw new Error('Gemini returned no text');
-    }
-
-    return text;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function callGemini({ apiKey, model, timeoutMs, prompt }) {
+async function callGemini({ config, prompt }) {
   const text = await fetchGeminiContent({
-    apiKey,
-    model,
-    timeoutMs,
+    config,
     prompt,
     generationConfig: {
       responseMimeType: 'application/json',
@@ -430,25 +467,32 @@ async function callGemini({ apiKey, model, timeoutMs, prompt }) {
   return JSON.parse(text);
 }
 
-async function callGeminiText({ apiKey, model, timeoutMs, prompt, signal }) {
-  return fetchGeminiContent({ apiKey, model, timeoutMs, prompt, signal });
+async function callGeminiText({ config, prompt, signal }) {
+  return fetchGeminiContent({ config, prompt, signal });
 }
 
 async function callCodexText({ config, prompt, probe = false, signal }) {
   const store = config.translationStore;
   if (!probe && store) {
-    const circuit = store.getTranslationCircuit(CODEX_PROVIDER);
-    if (circuit.state !== 'closed') {
-      const error = new Error(`Codex circuit is ${circuit.state}${circuit.next_probe_at ? ` until ${circuit.next_probe_at}` : ''}`);
-      error.code = 'CODEX_CIRCUIT_OPEN';
-      error.retryAfter = circuit.next_probe_at || null;
-      throw error;
-    }
+    assertCodexCircuitClosed(store);
   }
 
-  const auth = await resolveCodexAuth(config);
+  const operation = async () => {
+    if (!probe && store) {
+      assertCodexCircuitClosed(store);
+    }
+    const auth = await resolveCodexAuth(config);
+    return fetchCodexText({ config, prompt, probe, signal, auth });
+  };
+  return probe
+    ? operation()
+    : runTranslationRequest(config, CODEX_PROVIDER, signal, operation);
+}
+
+async function fetchCodexText({ config, prompt, probe, signal, auth }) {
+  const store = config.translationStore;
   const baseUrl = String(config.codexBaseUrl || 'https://chatgpt.com/backend-api/codex').replace(/\/+$/, '');
-  const timeoutMs = Number(config.codexTimeoutMs) || Number(config.geminiTimeoutMs) || 90_000;
+  const timeoutMs = getCodexTimeoutMs(config);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
@@ -523,16 +567,17 @@ async function callCodexText({ config, prompt, probe = false, signal }) {
 
     return text || 'OK';
   } catch (error) {
+    const cancelled = Boolean(signal?.aborted) && !controller.signal.aborted;
     store?.recordTranslationUsage({
       provider: CODEX_PROVIDER,
       model: getTranslationModel(config),
       requestKind,
-      status: 'error',
+      status: cancelled ? 'cancelled' : 'error',
       usage: extractCodexUsage(responseRaw),
       error: error.message,
       createdAt,
     });
-    if (!probe && isCodexUsageLimitError(error)) {
+    if (!probe && !cancelled && isCodexUsageLimitError(error)) {
       const circuit = openCodexCircuit(config, error);
       error.code = 'CODEX_USAGE_LIMIT';
       error.retryAfter = circuit.next_probe_at;
@@ -543,16 +588,50 @@ async function callCodexText({ config, prompt, probe = false, signal }) {
   }
 }
 
+function assertCodexCircuitClosed(store) {
+  const circuit = store.getTranslationCircuit(CODEX_PROVIDER);
+  if (circuit.state === 'closed') {
+    return;
+  }
+  const error = new Error(`Codex circuit is ${circuit.state}${circuit.next_probe_at ? ` until ${circuit.next_probe_at}` : ''}`);
+  error.code = 'CODEX_CIRCUIT_OPEN';
+  error.retryAfter = circuit.next_probe_at || null;
+  throw error;
+}
+
+function runTranslationRequest(config, provider, signal, operation) {
+  const pool = config.translationRequestPool;
+  if (!pool) {
+    return operation();
+  }
+  return pool.run(provider, operation, { signal, group: signal });
+}
+
 function openCodexCircuit(config, error) {
   const store = config.translationStore;
   if (!store) {
     return null;
   }
-  const current = store.getTranslationCircuit(CODEX_PROVIDER);
-  const delayIndex = Math.min(Number(current.failure_count || 0), CODEX_PROBE_DELAYS_MINUTES.length - 1);
   const now = new Date();
-  const scheduledProbeAt = new Date(now.getTime() + CODEX_PROBE_DELAYS_MINUTES[delayIndex] * 60_000);
+  const current = store.getTranslationCircuit(CODEX_PROVIDER);
   const responseRetryAt = parseRetryAfter(error.retryAfter, now);
+  if (current.state === 'open') {
+    const currentProbeAt = current.next_probe_at ? new Date(current.next_probe_at) : null;
+    if (
+      responseRetryAt &&
+      (!currentProbeAt || !Number.isFinite(currentProbeAt.getTime()) || responseRetryAt > currentProbeAt)
+    ) {
+      return store.extendTranslationCircuit(
+        CODEX_PROVIDER,
+        error.message,
+        now.toISOString(),
+        responseRetryAt.toISOString()
+      );
+    }
+    return current;
+  }
+  const delayIndex = Math.min(Number(current.failure_count || 0), CODEX_PROBE_DELAYS_MINUTES.length - 1);
+  const scheduledProbeAt = new Date(now.getTime() + CODEX_PROBE_DELAYS_MINUTES[delayIndex] * 60_000);
   const nextProbeAt = responseRetryAt && responseRetryAt > scheduledProbeAt
     ? responseRetryAt.toISOString()
     : scheduledProbeAt.toISOString();
@@ -624,7 +703,7 @@ async function resolveCodexAuth(config) {
 async function refreshAndPersistCodexAuth({ config, authFile, payload, tokens, refreshToken }) {
   const refreshed = await refreshCodexToken({
     refreshToken,
-    timeoutMs: Number(config.codexTimeoutMs) || Number(config.geminiTimeoutMs) || 90_000,
+    timeoutMs: getCodexTimeoutMs(config),
   });
   payload.tokens = {
     ...tokens,
@@ -643,6 +722,10 @@ function resolveCodexAuthFile(config) {
 
   const codexHome = process.env.CODEX_HOME ? expandHome(process.env.CODEX_HOME) : path.join(os.homedir(), '.codex');
   return path.join(codexHome, 'auth.json');
+}
+
+function getCodexTimeoutMs(config) {
+  return Number(config.codexTimeoutMs) || Number(config.geminiTimeoutMs) || 90_000;
 }
 
 function readCodexAuthFile(authFile) {

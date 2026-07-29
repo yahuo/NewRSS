@@ -95,6 +95,7 @@ const config = {
   geminiTimeoutMs: boundedInteger('GEMINI_TIMEOUT_MS', 90000, { min: 1000, max: 600000 }),
   geminiChunkMaxWords: boundedInteger('GEMINI_CHUNK_MAX_WORDS', 1200, { min: 200, max: 10000 }),
   geminiChunkConcurrency: boundedInteger('GEMINI_CHUNK_CONCURRENCY', 3, { min: 1, max: 8 }),
+  translationRequestConcurrency: boundedInteger('TRANSLATION_REQUEST_CONCURRENCY', 6, { min: 1, max: 8 }),
   codexAuthFile: process.env.CODEX_AUTH_FILE || '',
   codexModel: process.env.CODEX_MODEL || 'openai-codex/gpt-5.5',
   codexBaseUrl: process.env.CODEX_BASE_URL || 'https://chatgpt.com/backend-api/codex',

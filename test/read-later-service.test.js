@@ -38,6 +38,37 @@ test('read-later translation inherits the global provider when no override is co
   assert.equal(service.translationService.config.translationProvider, 'codex-oauth');
 });
 
+test('feed and read-later translations share and obey one provider request pool', async (t) => {
+  const fixture = createFixture(t, { translationRequestConcurrency: 1 });
+  let active = 0;
+  let maximumActive = 0;
+  const previousFetch = global.fetch;
+  global.fetch = async () => {
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    active -= 1;
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: '共享池标题' }] } }],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  t.after(() => { global.fetch = previousFetch; });
+
+  assert.equal(fixture.service.translationRequestPool, fixture.feedService.translationRequestPool);
+  assert.equal(fixture.service.translationService.requestPool, fixture.feedService.translationRequestPool);
+  assert.deepEqual(
+    await Promise.all([
+      fixture.feedService.translationService.translateTitle({ title: 'Feed title', sourceUrl: '' }),
+      fixture.service.translationService.translateTitle({ title: 'Read later title', sourceUrl: '' }),
+    ]),
+    ['共享池标题', '共享池标题']
+  );
+  assert.equal(maximumActive, 1);
+});
+
 test('read-later uses stable X identity, strips fragments, and preserves an unchanged translation', async (t) => {
   const fixture = createFixture(t);
   fixture.service.importUrl = async ({ url, workspaceDir }) => {
@@ -242,6 +273,109 @@ test('an in-flight translation retry cannot overwrite a newer save', async (t) =
   assert.equal(current.translation_retry_after, null);
 });
 
+test('due read-later translations retry concurrently and keep result order', async (t) => {
+  const fixture = createFixture(t);
+  fixture.config.readLaterJobConcurrency = 2;
+  fixture.service.importUrl = async ({ workspaceDir, url }) => {
+    fs.mkdirSync(workspaceDir, { recursive: true });
+    return {
+      strategy: 'readability',
+      sourceTitle: url,
+      sourceAuthor: '',
+      sourcePublishedAt: null,
+      sourceContentHtml: '<p>English content for translation retry.</p>',
+      extractedContentHtml: '<p>English content for translation retry.</p>',
+      translationProvider: 'readability',
+    };
+  };
+  fixture.service.translationService.shouldTranslate = () => true;
+  fixture.service.translationService.translateArticle = async () => {
+    throw new Error('initial translation failure');
+  };
+  const first = await fixture.service.saveUrl({
+    baseUrl: 'http://newrss.local:8787',
+    url: 'https://example.com/retry-one',
+    translate: true,
+  });
+  const second = await fixture.service.saveUrl({
+    baseUrl: 'http://newrss.local:8787',
+    url: 'https://example.com/retry-two',
+    translate: true,
+  });
+  fixture.db.db.prepare(`UPDATE entries SET translation_retry_after = ? WHERE id IN (?, ?)`).run(
+    '2020-01-01T00:00:00.000Z',
+    first.entryId,
+    second.entryId
+  );
+  const expectedOrder = fixture.db
+    .listDueReadLaterTranslationRetries(fixture.config.readLaterFeedName, new Date().toISOString(), 50)
+    .map((entry) => entry.id);
+
+  let active = 0;
+  let maximumActive = 0;
+  let releaseTranslations;
+  const translationGate = new Promise((resolve) => {
+    releaseTranslations = resolve;
+  });
+  fixture.service.translationService.translateArticle = async ({ sourceTitle }) => {
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    await translationGate;
+    active -= 1;
+    return {
+      translatedTitle: `translated ${sourceTitle}`,
+      translatedContentHtml: '<p>translated body</p>',
+      provider: 'test-model',
+    };
+  };
+
+  const retrying = fixture.service.retryDueTranslations();
+  await waitFor(() => maximumActive === 2);
+  releaseTranslations();
+  const results = await retrying;
+
+  assert.equal(maximumActive, 2);
+  assert.equal(active, 0);
+  assert.deepEqual(results.map((result) => result.entryId), expectedOrder);
+  assert.deepEqual(results.map((result) => result.status), ['ok', 'ok']);
+});
+
+test('due read-later retry waits for sibling work after one item throws unexpectedly', async (t) => {
+  const fixture = createFixture(t, { readLaterJobConcurrency: 2 });
+  fixture.db.listDueReadLaterTranslationRetries = () => [{ id: 1 }, { id: 2 }];
+  fixture.db.setFeedRefreshResult = () => {};
+
+  let releaseSecond;
+  let markSecondStarted;
+  const secondStarted = new Promise((resolve) => {
+    markSecondStarted = resolve;
+  });
+  fixture.service.retryTranslationEntry = async (_feedName, entry) => {
+    if (entry.id === 1) {
+      throw new Error('database write failed');
+    }
+    markSecondStarted();
+    await new Promise((resolve) => {
+      releaseSecond = resolve;
+    });
+    return { entryId: entry.id, status: 'ok' };
+  };
+
+  let settled = false;
+  const retrying = fixture.service.retryDueTranslations().finally(() => {
+    settled = true;
+  });
+  await secondStarted;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+
+  releaseSecond();
+  assert.deepEqual(await retrying, [
+    { entryId: 1, status: 'error', error: 'database write failed' },
+    { entryId: 2, status: 'ok' },
+  ]);
+});
+
 test('deleting a read-later item invalidates its rendered RSS cache', async (t) => {
   const fixture = createFixture(t);
   fixture.service.importUrl = async ({ workspaceDir }) => {
@@ -274,7 +408,7 @@ test('read-later rejects non-HTTP URLs and strict deletion does not accept parti
   assert.throws(() => fixture.service.deleteItem('9007199254740992'), /invalid read-later entry id/);
 });
 
-function createFixture(t) {
+function createFixture(t, overrides = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'newrss-read-later-'));
   const db = new Database(path.join(directory, 'newrss.db'));
   const config = {
@@ -284,10 +418,12 @@ function createFixture(t) {
     readLaterStoragePath: path.join(directory, 'read-later'), readLaterTranslationProvider: '',
     translationProvider: 'gemini', geminiApiKey: 'test-key', geminiModel: 'test-model',
     geminiTimeoutMs: 5_000, geminiChunkMaxWords: 1_200, geminiChunkConcurrency: 1,
+    translationRequestConcurrency: 3, readLaterJobConcurrency: 1,
     translateTargetLanguage: 'Simplified Chinese', httpTimeoutMs: 5_000,
     articleMaxBytes: 1024 * 1024, outboundMaxRedirects: 3, outboundAllowedHosts: ['example.com'],
     upstreamProxyUrl: '', userAgent: 'NewRSS test', articleCookieFile: '', articleCookieDomain: '', articleCookieHeader: '',
     maxItemsPerFeed: 50,
+    ...overrides,
   };
   const feedService = new FeedService({ db, config });
   const service = new ReadLaterService({ db, config, feedService });

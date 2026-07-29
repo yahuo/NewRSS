@@ -949,9 +949,23 @@ class Database {
         next_probe_at = excluded.next_probe_at,
         last_probe_at = excluded.last_probe_at,
         last_error = excluded.last_error,
-        probe_in_progress = 0,
+        probe_in_progress = translation_circuits.probe_in_progress,
         updated_at = excluded.updated_at
     `).run(provider, failureCount, now, nextProbeAt, current.last_probe_at, String(error || ''), now);
+    return this.getTranslationCircuit(provider);
+  }
+
+  extendTranslationCircuit(provider, error, now, nextProbeAt) {
+    this.db.prepare(`
+      UPDATE translation_circuits
+      SET next_probe_at = CASE
+            WHEN next_probe_at IS NULL OR next_probe_at < ? THEN ?
+            ELSE next_probe_at
+          END,
+          last_error = ?,
+          updated_at = ?
+      WHERE provider = ? AND state = 'open'
+    `).run(nextProbeAt, nextProbeAt, String(error || ''), now, provider);
     return this.getTranslationCircuit(provider);
   }
 
@@ -966,10 +980,42 @@ class Database {
     return this.getTranslationCircuit(provider);
   }
 
-  claimTranslationProbe(provider, now, force = false) {
+  completeTranslationProbe(provider, probeStartedAt, now) {
+    const result = this.db.prepare(`
+      UPDATE translation_circuits
+      SET state = 'closed', failure_count = 0, opened_at = NULL, next_probe_at = NULL,
+          last_error = NULL, probe_in_progress = 0, updated_at = ?
+      WHERE provider = ?
+        AND last_probe_at = ?
+        AND probe_in_progress = 1
+        AND state IN ('closed', 'half-open')
+    `).run(now, provider, probeStartedAt);
+    return {
+      completed: result.changes === 1,
+      circuit: this.getTranslationCircuit(provider),
+    };
+  }
+
+  claimTranslationProbe(provider, now, force = false, abandonedBefore = null) {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const circuit = this.getTranslationCircuit(provider);
+      let circuit = this.getTranslationCircuit(provider);
+      const abandoned =
+        circuit.probe_in_progress &&
+        abandonedBefore &&
+        (!circuit.last_probe_at || circuit.last_probe_at <= abandonedBefore);
+      if (abandoned) {
+        this.db.prepare(`
+          UPDATE translation_circuits
+          SET state = CASE WHEN state = 'half-open' THEN 'open' ELSE state END,
+              next_probe_at = CASE WHEN state = 'half-open' THEN ? ELSE next_probe_at END,
+              probe_in_progress = 0,
+              updated_at = ?
+          WHERE provider = ? AND probe_in_progress = 1
+        `).run(now, now, provider);
+        circuit = this.getTranslationCircuit(provider);
+      }
+
       const due = force || (circuit.state === 'open' && circuit.next_probe_at && circuit.next_probe_at <= now);
       if (circuit.probe_in_progress || (!force && circuit.state === 'closed') || !due) {
         this.db.exec('COMMIT');
@@ -994,12 +1040,12 @@ class Database {
     }
   }
 
-  releaseTranslationProbe(provider, now) {
+  releaseTranslationProbe(provider, probeStartedAt, now) {
     this.db.prepare(`
       UPDATE translation_circuits
       SET probe_in_progress = 0, updated_at = ?
-      WHERE provider = ?
-    `).run(now, provider);
+      WHERE provider = ? AND last_probe_at = ? AND probe_in_progress = 1
+    `).run(now, provider, probeStartedAt);
   }
 
   recordTranslationUsage({ provider, model, requestKind, status, usage, error, createdAt }) {

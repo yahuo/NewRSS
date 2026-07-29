@@ -4,6 +4,7 @@ const { resolveArticleContent } = require('./extractor');
 const { sanitizeHtml } = require('./html-sanitizer');
 const { fetchText } = require('./outbound-http');
 const TranslationService = require('./translation-service');
+const TranslationRequestPool = require('./translation-request-pool');
 const DEFAULT_RSS_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 const {
   buildFeedNameFromUrl,
@@ -17,10 +18,15 @@ const {
 } = require('./utils');
 
 class FeedService {
-  constructor({ db, config }) {
+  constructor({ db, config, translationRequestPool = null }) {
     this.db = db;
     this.config = config;
-    this.translationService = new TranslationService(config, { db });
+    this.translationRequestPool =
+      translationRequestPool || new TranslationRequestPool(config.translationRequestConcurrency);
+    this.translationService = new TranslationService(config, {
+      db,
+      requestPool: this.translationRequestPool,
+    });
     this.activeRefresh = null;
     this.feedXmlCache = new Map();
     this.feedXmlCacheBytes = 0;

@@ -10,6 +10,7 @@ test('numeric configuration rejects partial and out-of-range values', () => {
     ['MAX_ITEMS_PER_FEED', '-1'],
     ['MAX_ITEMS_PER_REFRESH', '10items'],
     ['GEMINI_CHUNK_MAX_WORDS', '0'],
+    ['TRANSLATION_REQUEST_CONCURRENCY', '0'],
     ['RSS_CACHE_MAX_BYTES', '1024'],
     ['REFRESH_INTERVAL_MINUTES', '999999'],
   ]) {
@@ -21,6 +22,32 @@ test('numeric configuration rejects partial and out-of-range values', () => {
 
     assert.notEqual(result.status, 0, `${name}=${value} should fail`);
     assert.match(result.stderr, new RegExp(name));
+  }
+});
+
+test('translation request concurrency defaults to six and accepts an explicit bound', () => {
+  for (const [value, expected] of [
+    [undefined, '6'],
+    ['4', '4'],
+  ]) {
+    const env = { ...process.env };
+    if (value == null) {
+      delete env.TRANSLATION_REQUEST_CONCURRENCY;
+    } else {
+      env.TRANSLATION_REQUEST_CONCURRENCY = value;
+    }
+    const result = spawnSync(
+      process.execPath,
+      ['-e', "process.stdout.write(String(require('./src/config').translationRequestConcurrency))"],
+      {
+        cwd: projectRoot,
+        env,
+        encoding: 'utf8',
+      }
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, expected);
   }
 });
 
