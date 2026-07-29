@@ -786,7 +786,7 @@ class FeedService {
       });
     }
 
-    const xml = rss.xml({ indent: true });
+    const xml = removeInvalidXmlCharacters(rss.xml({ indent: true }));
     this.cacheFeedXml(feedName, cacheKey, xml);
     return xml;
   }
@@ -877,6 +877,13 @@ function escapeXml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+function removeInvalidXmlCharacters(value) {
+  return String(value).replace(
+    /[^\u0009\u000A\u000D\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/gu,
+    ''
+  );
 }
 
 function nextTranslationRetryAt(existingEntry, failedAt, providerRetryAfter) {

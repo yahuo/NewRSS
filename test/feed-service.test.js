@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { JSDOM } = require('jsdom');
 
 const Database = require('../src/db');
 const FeedService = require('../src/feed-service');
@@ -104,6 +105,44 @@ test('feed metadata changes advance the RSS revision and invalidate cached XML',
   assert.notEqual(secondXml, firstXml);
   assert.match(secondXml, /New title/);
   assert.match(secondXml, /<language><!\[CDATA\[zh-CN\]\]><\/language>/);
+});
+
+test('RSS output removes invalid XML characters without corrupting Unicode', (t) => {
+  const { db, directory, service } = createService();
+  t.after(() => {
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const now = new Date().toISOString();
+  service.saveFeed({
+    name: 'XmlSafety',
+    sourceUrl: 'https://example.com/feed.xml',
+    title: 'XML Safety',
+    translateEnabled: false,
+  });
+  db.upsertEntry({
+    feedName: 'XmlSafety',
+    sourceGuid: 'invalid-control-character',
+    sourceUrl: 'https://example.com/article',
+    sourceTitle: 'Coffee\u000b story 😀',
+    sourceContentHtml: '<p>Aga Wieckowska\u000b\u000bVIDEO 😀</p>',
+    extractedContentHtml: null,
+    translationProvider: 'readability',
+    refreshStatus: 'ok',
+    refreshedAt: now,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  const xml = service.renderFeedXml({
+    request: { get: () => 'newrss.local:8787', protocol: 'http' },
+    feedName: 'XmlSafety',
+  });
+
+  assert.equal(xml.includes('\u000b'), false);
+  assert.match(xml, /Coffee story 😀/);
+  assert.match(xml, /Aga WieckowskaVIDEO 😀/);
+  assert.doesNotThrow(() => new JSDOM(xml, { contentType: 'text/xml' }));
 });
 
 test('RSS cache applies a global byte budget and evicts the least recently used feed', (t) => {
