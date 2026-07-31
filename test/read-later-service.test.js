@@ -14,13 +14,14 @@ test('read-later translation can use a provider override independent of global t
     feedService: {},
     config: {
       translationProvider: 'codex-oauth',
-      readLaterTranslationProvider: 'gemini',
-      geminiApiKey: 'test-gemini-key',
+      readLaterTranslationProvider: 'deepseek',
+      deepseekApiKey: 'test-deepseek-key',
       codexAuthFile: '/tmp/missing-codex-auth.json',
     },
   });
 
-  assert.equal(service.translationService.config.translationProvider, 'gemini');
+  assert.equal(service.translationService.config.translationProvider, 'deepseek');
+  assert.equal(service.translationService.isEnabled(), true);
   assert.equal(service.config.translationProvider, 'codex-oauth');
 });
 

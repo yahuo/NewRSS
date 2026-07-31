@@ -9,6 +9,409 @@ const TranslationService = require('../src/translation-service');
 const TranslationRequestPool = require('../src/translation-request-pool');
 const { buildHtmlTranslationPlan } = require('../src/html-chunker');
 
+test('deepseek provider uses the Chat Completions API for text translation', async () => {
+  const calls = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse({
+      choices: [{ finish_reason: 'stop', message: { content: '测试标题' } }],
+    });
+  };
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'deepseek',
+      deepseekApiKey: 'deepseek-test-key',
+      deepseekModel: 'deepseek-v4-flash',
+      deepseekBaseUrl: 'https://api.deepseek.com/',
+      deepseekTimeoutMs: 5_000,
+      translationRequestConcurrency: 6,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+
+    assert.equal(service.isEnabled(), true);
+    assert.equal(await service.translateTitle({ title: 'Test title', sourceUrl: 'https://example.com' }), '测试标题');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://api.deepseek.com/chat/completions');
+    assert.equal(calls[0].options.headers.authorization, 'Bearer deepseek-test-key');
+    const body = JSON.parse(calls[0].options.body);
+    assert.equal(body.model, 'deepseek-v4-flash');
+    assert.equal(body.stream, false);
+    assert.equal(body.temperature, 0.2);
+    assert.equal(body.max_tokens, 384_000);
+    assert.deepEqual(body.thinking, { type: 'disabled' });
+    assert.match(body.messages[0].content, /translation engine/);
+    assert.equal(body.messages[0].role, 'system');
+    assert.equal(body.messages[1].role, 'user');
+    assert.match(body.messages[1].content, /Test title/);
+    assert.equal(body.response_format, undefined);
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
+test('deepseek provider requests JSON output for whole-article translation', async () => {
+  const calls = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse({
+      choices: [{
+        finish_reason: 'stop',
+        message: {
+          content: JSON.stringify({
+            translatedTitle: '中文标题',
+            translatedContentHtml: '<p>中文正文</p>',
+          }),
+        },
+      }],
+    });
+  };
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'deepseek',
+      deepseekApiKey: 'deepseek-test-key',
+      deepseekModel: 'deepseek-v4-pro',
+      deepseekBaseUrl: 'https://api.deepseek.com',
+      deepseekTimeoutMs: 5_000,
+      geminiChunkMaxWords: 2_000,
+      translationRequestConcurrency: 6,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+
+    const translated = await service.translateArticle({
+      sourceTitle: 'English article title',
+      contentHtml: '<p>This is a long enough English article body for the direct JSON translation path.</p>',
+      sourceUrl: 'https://example.com/article',
+    });
+
+    assert.equal(translated.translatedTitle, '中文标题');
+    assert.equal(translated.translatedContentHtml, '<p>中文正文</p>');
+    assert.equal(translated.provider, 'deepseek-v4-pro');
+    const body = JSON.parse(calls[0].options.body);
+    assert.equal(body.model, 'deepseek-v4-pro');
+    assert.deepEqual(body.response_format, { type: 'json_object' });
+    assert.match(body.messages[1].content, /JSON schema/);
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
+test('deepseek provider is disabled without an API key', () => {
+  const service = new TranslationService({
+    translationProvider: 'deepseek',
+    deepseekApiKey: '   ',
+  });
+
+  assert.equal(service.isEnabled(), false);
+});
+
+test('deepseek provider surfaces API errors', async () => {
+  const previousFetch = global.fetch;
+  global.fetch = async () => new Response(JSON.stringify({ error: { message: 'DeepSeek quota exceeded' } }), {
+    status: 429,
+    headers: {
+      'content-type': 'application/json',
+      'retry-after': '21600',
+    },
+  });
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'deepseek',
+      deepseekApiKey: 'deepseek-test-key',
+      deepseekTimeoutMs: 5_000,
+      translationRequestConcurrency: 6,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+
+    const startedAt = Date.now();
+    let providerError;
+    await assert.rejects(
+      service.translateTitle({ title: 'Test title', sourceUrl: '' }),
+      (error) => {
+        providerError = error;
+        return /DeepSeek quota exceeded/.test(error.message);
+      }
+    );
+    const retryAt = new Date(providerError.retryAfter).getTime();
+    assert.ok(retryAt >= startedAt + 21_599_000);
+    assert.ok(retryAt <= Date.now() + 21_601_000);
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
+test('deepseek provider preserves its error when Retry-After is outside the Date range', async () => {
+  const previousFetch = global.fetch;
+  global.fetch = async () => new Response(JSON.stringify({ error: { message: 'DeepSeek quota exceeded' } }), {
+    status: 429,
+    headers: {
+      'content-type': 'application/json',
+      'retry-after': '1785516620000000',
+    },
+  });
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'deepseek',
+      deepseekApiKey: 'deepseek-test-key',
+      deepseekTimeoutMs: 5_000,
+      translationRequestConcurrency: 6,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+    let providerError;
+    await assert.rejects(
+      service.translateTitle({ title: 'Test title', sourceUrl: '' }),
+      (error) => {
+        providerError = error;
+        return /DeepSeek quota exceeded/.test(error.message);
+      }
+    );
+    assert.equal(providerError.retryAfter, null);
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
+test('deepseek provider rejects truncated, empty, and non-JSON responses', async () => {
+  const responses = [
+    jsonResponse({ choices: [{ finish_reason: 'length', message: { content: 'truncated' } }] }),
+    jsonResponse({ choices: [{ finish_reason: 'stop', message: { content: '   ' } }] }),
+    new Response('upstream unavailable', { status: 503 }),
+  ];
+  const previousFetch = global.fetch;
+  global.fetch = async () => responses.shift();
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'deepseek',
+      deepseekApiKey: 'deepseek-test-key',
+      deepseekTimeoutMs: 5_000,
+      translationRequestConcurrency: 6,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+
+    await assert.rejects(service.translateTitle({ title: 'Truncated', sourceUrl: '' }), /finish_reason length/);
+    await assert.rejects(service.translateTitle({ title: 'Empty', sourceUrl: '' }), /returned no text/);
+    await assert.rejects(service.translateTitle({ title: 'Unavailable', sourceUrl: '' }), /status 503/);
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
+test('deepseek chunk translation runs concurrently within its per-article cap and preserves order', async () => {
+  let active = 0;
+  let maximumActive = 0;
+  const started = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (_url, options) => {
+    const prompt = JSON.parse(options.body).messages[1].content;
+    const chunk = prompt.match(/Chunk: (\d+) of (\d+)/);
+    const kind = chunk ? `chunk-${chunk[1]}` : 'title';
+    started.push(kind);
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    try {
+      await abortableDelay(chunk ? 35 - Number(chunk[1]) * 3 : 25, options.signal);
+      const text = chunk
+        ? `<p data-chunk="${chunk[1]}">translated ${chunk[1]}</p>`
+        : '并发标题';
+      return jsonResponse({ choices: [{ finish_reason: 'stop', message: { content: text } }] });
+    } finally {
+      active -= 1;
+    }
+  };
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'deepseek',
+      deepseekApiKey: 'deepseek-test-key',
+      deepseekModel: 'deepseek-v4-flash',
+      deepseekTimeoutMs: 5_000,
+      geminiChunkMaxWords: 200,
+      translationRequestConcurrency: 6,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+    const translated = await service.translateArticle({
+      sourceTitle: 'A long English title for testing',
+      sourceUrl: 'https://example.com/chunked',
+      contentHtml: Array.from(
+        { length: 5 },
+        (_, chunkIndex) =>
+          `<p>${Array.from({ length: 190 }, (_, wordIndex) => `chunk${chunkIndex + 1}-word${wordIndex + 1}`).join(' ')}</p>`
+      ).join(''),
+    });
+
+    assert.equal(translated.translatedTitle, '并发标题');
+    assert.deepEqual(
+      Array.from(translated.translatedContentHtml.matchAll(/data-chunk="(\d+)"/g), (match) => Number(match[1])),
+      [1, 2, 3, 4, 5]
+    );
+    assert.deepEqual(started.slice(0, 3), ['title', 'chunk-1', 'chunk-2']);
+    assert.equal(maximumActive, 3);
+    assert.equal(active, 0);
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
+test('deepseek chunk failure cancels active siblings and does not start queued work', async () => {
+  let active = 0;
+  let maximumActive = 0;
+  let cancelled = 0;
+  let calls = 0;
+  const previousFetch = global.fetch;
+  global.fetch = async (_url, options) => {
+    calls += 1;
+    const prompt = JSON.parse(options.body).messages[1].content;
+    const chunk = prompt.match(/Chunk: (\d+) of (\d+)/);
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    try {
+      if (chunk?.[1] === '2') {
+        await abortableDelay(10, options.signal);
+        return jsonResponse({ error: { message: 'temporary failure' } }, 500);
+      }
+      await abortableDelay(200, options.signal);
+      const text = chunk ? `<p>${chunk[1]}</p>` : '标题';
+      return jsonResponse({ choices: [{ finish_reason: 'stop', message: { content: text } }] });
+    } catch (error) {
+      if (options.signal.aborted) {
+        cancelled += 1;
+      }
+      throw error;
+    } finally {
+      active -= 1;
+    }
+  };
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'deepseek',
+      deepseekApiKey: 'deepseek-test-key',
+      deepseekTimeoutMs: 5_000,
+      translationRequestConcurrency: 3,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+    await assert.rejects(service.translateArticleInChunks({
+      sourceTitle: 'A long English title for testing',
+      sourceUrl: 'https://example.com/chunked',
+      htmlPlan: {
+        chunks: Array.from({ length: 8 }, (_, index) => `<p>chunk ${index + 1}</p>`),
+        wrap: (html) => html,
+      },
+    }), /temporary failure/);
+
+    assert.equal(calls, 3);
+    assert.equal(maximumActive, 3);
+    assert.equal(cancelled, 2);
+    assert.equal(active, 0);
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
+test('deepseek output budget accommodates a large pre block that remains one chunk', async () => {
+  const code = Array.from(
+    { length: 5_000 },
+    (_, index) => `const value${index} = "${String(index).padStart(6, '0')}-${'x'.repeat(16)}";`
+  ).join('\n');
+  const htmlPlan = buildHtmlTranslationPlan(`<pre>${code}</pre>`, { maxWords: 1_200 });
+  assert.equal(htmlPlan.chunks.length, 1);
+  assert.ok(htmlPlan.chunks[0].length > 200_000);
+
+  let requestBody;
+  const previousFetch = global.fetch;
+  global.fetch = async (_url, options) => {
+    requestBody = JSON.parse(options.body);
+    return jsonResponse({
+      choices: [{ finish_reason: 'stop', message: { content: '<pre>translated</pre>' } }],
+    });
+  };
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'deepseek',
+      deepseekApiKey: 'deepseek-test-key',
+      deepseekTimeoutMs: 5_000,
+      translationRequestConcurrency: 3,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+    await service.translateArticleInChunks({
+      sourceTitle: '',
+      sourceUrl: 'https://example.com/large-code',
+      htmlPlan,
+    });
+
+    assert.equal(requestBody.max_tokens, 384_000);
+    assert.match(requestBody.messages[1].content, /const value4999/);
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
+test('deepseek provider honors caller cancellation', async () => {
+  let notifyFetchStarted;
+  const fetchStarted = new Promise((resolve) => {
+    notifyFetchStarted = resolve;
+  });
+  let fetchCalls = 0;
+  const previousFetch = global.fetch;
+  global.fetch = async (_url, options) => {
+    fetchCalls += 1;
+    notifyFetchStarted();
+    await abortableDelay(1_000, options.signal);
+    return jsonResponse({});
+  };
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'deepseek',
+      deepseekApiKey: 'deepseek-test-key',
+      deepseekTimeoutMs: 5_000,
+      translationRequestConcurrency: 6,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+    const controller = new AbortController();
+    const pending = service.translateTitle({ title: 'Test title', sourceUrl: '', signal: controller.signal });
+    await fetchStarted;
+    controller.abort();
+
+    await assert.rejects(pending, (error) => error?.name === 'AbortError');
+    assert.equal(fetchCalls, 1);
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
+test('deepseek provider aborts a request after its configured timeout', async () => {
+  const previousFetch = global.fetch;
+  global.fetch = async (_url, options) => {
+    await abortableDelay(1_000, options.signal);
+    return jsonResponse({});
+  };
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'deepseek',
+      deepseekApiKey: 'deepseek-test-key',
+      deepseekTimeoutMs: 10,
+      translationRequestConcurrency: 6,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+
+    await assert.rejects(
+      service.translateTitle({ title: 'Test title', sourceUrl: '' }),
+      (error) => error?.name === 'AbortError'
+    );
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
 test('codex-oauth provider uses the configured auth file and Responses API', async () => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'newrss-codex-'));
   const authFile = path.join(temporaryDirectory, 'auth.json');
@@ -282,6 +685,35 @@ test('codex usage-limit opens a persistent circuit and blocks later requests', a
   assert.equal(usage.totals.request_count, 1);
   assert.equal(usage.recent[0].status, 'error');
   assert.equal(usage.recent[0].input_tokens, null);
+});
+
+test('codex normalizes Retry-After for non-usage errors before translation retry scheduling', async (t) => {
+  const fixture = createCodexFixture(t);
+  const previousFetch = global.fetch;
+  global.fetch = async () => new Response(JSON.stringify({ error: { message: 'temporarily unavailable' } }), {
+    status: 503,
+    headers: {
+      'content-type': 'application/json',
+      'retry-after': '21600',
+    },
+  });
+  t.after(() => { global.fetch = previousFetch; });
+
+  const service = new TranslationService(fixture.config, { db: fixture.db });
+  const startedAt = Date.now();
+  let providerError;
+  await assert.rejects(
+    service.translateTitle({ title: 'Retry later', sourceUrl: '' }),
+    (error) => {
+      providerError = error;
+      return /temporarily unavailable/.test(error.message);
+    }
+  );
+
+  const retryAt = new Date(providerError.retryAfter).getTime();
+  assert.ok(retryAt >= startedAt + 21_599_000);
+  assert.ok(retryAt <= Date.now() + 21_601_000);
+  assert.equal(fixture.db.getTranslationCircuit('codex-oauth').state, 'closed');
 });
 
 test('codex probe uses escalating intervals and a successful probe closes the circuit', async (t) => {

@@ -10,6 +10,7 @@ test('numeric configuration rejects partial and out-of-range values', () => {
     ['MAX_ITEMS_PER_FEED', '-1'],
     ['MAX_ITEMS_PER_REFRESH', '10items'],
     ['GEMINI_CHUNK_MAX_WORDS', '0'],
+    ['DEEPSEEK_TIMEOUT_MS', '999999'],
     ['TRANSLATION_REQUEST_CONCURRENCY', '0'],
     ['RSS_CACHE_MAX_BYTES', '1024'],
     ['REFRESH_INTERVAL_MINUTES', '999999'],
@@ -23,6 +24,33 @@ test('numeric configuration rejects partial and out-of-range values', () => {
     assert.notEqual(result.status, 0, `${name}=${value} should fail`);
     assert.match(result.stderr, new RegExp(name));
   }
+});
+
+test('DeepSeek API configuration uses the official defaults', () => {
+  const env = { ...process.env };
+  for (const name of ['DEEPSEEK_API_KEY', 'DEEPSEEK_MODEL', 'DEEPSEEK_BASE_URL', 'DEEPSEEK_TIMEOUT_MS']) {
+    delete env[name];
+  }
+  const result = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      "const config=require('./src/config');process.stdout.write(JSON.stringify({apiKey:config.deepseekApiKey,model:config.deepseekModel,baseUrl:config.deepseekBaseUrl,timeoutMs:config.deepseekTimeoutMs}))",
+    ],
+    {
+      cwd: projectRoot,
+      env,
+      encoding: 'utf8',
+    }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    apiKey: '',
+    model: 'deepseek-v4-flash',
+    baseUrl: 'https://api.deepseek.com',
+    timeoutMs: 90_000,
+  });
 });
 
 test('translation request concurrency defaults to six and accepts an explicit bound', () => {

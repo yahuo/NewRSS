@@ -13,7 +13,10 @@ const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120;
 const CODEX_PROVIDER = 'codex-oauth';
+const DEEPSEEK_PROVIDER = 'deepseek';
 const CODEX_CHUNK_CONCURRENCY = 3;
+const DEEPSEEK_CHUNK_CONCURRENCY = 3;
+const DEEPSEEK_MAX_OUTPUT_TOKENS = 384_000;
 const CODEX_PROBE_LEASE_GRACE_MS = 5_000;
 const CODEX_PROBE_DELAYS_MINUTES = [15, 30, 60, 120];
 const codexAuthRefreshes = new Map();
@@ -30,8 +33,12 @@ class TranslationService {
   }
 
   isEnabled() {
-    if (getTranslationProvider(this.config) === 'codex-oauth') {
+    const provider = getTranslationProvider(this.config);
+    if (provider === CODEX_PROVIDER) {
       return fs.existsSync(resolveCodexAuthFile(this.config));
+    }
+    if (provider === DEEPSEEK_PROVIDER) {
+      return Boolean(String(this.config.deepseekApiKey || '').trim());
     }
 
     return Boolean(String(this.config.geminiApiKey || '').trim());
@@ -353,33 +360,53 @@ function getTranslationProvider(config) {
 }
 
 function getTranslationModel(config) {
-  return getTranslationProvider(config) === 'codex-oauth'
-    ? String(config.codexModel || 'openai-codex/gpt-5.5').trim()
-    : String(config.geminiModel || 'gemini-2.5-flash').trim();
+  const provider = getTranslationProvider(config);
+  if (provider === CODEX_PROVIDER) {
+    return String(config.codexModel || 'openai-codex/gpt-5.5').trim();
+  }
+  if (provider === DEEPSEEK_PROVIDER) {
+    return String(config.deepseekModel || 'deepseek-v4-flash').trim();
+  }
+  return String(config.geminiModel || 'gemini-2.5-flash').trim();
 }
 
 function getChunkConcurrency(config) {
-  if (getTranslationProvider(config) === CODEX_PROVIDER) {
+  const provider = getTranslationProvider(config);
+  if (provider === CODEX_PROVIDER) {
     return Math.min(
       CODEX_CHUNK_CONCURRENCY,
       Math.max(1, Number(config.translationRequestConcurrency) || CODEX_CHUNK_CONCURRENCY)
+    );
+  }
+  if (provider === DEEPSEEK_PROVIDER) {
+    return Math.min(
+      DEEPSEEK_CHUNK_CONCURRENCY,
+      Math.max(1, Number(config.translationRequestConcurrency) || DEEPSEEK_CHUNK_CONCURRENCY)
     );
   }
   return Math.max(1, Number(config.geminiChunkConcurrency) || 3);
 }
 
 async function callTranslationJson({ config, prompt }) {
-  if (getTranslationProvider(config) === 'codex-oauth') {
+  const provider = getTranslationProvider(config);
+  if (provider === CODEX_PROVIDER) {
     const text = await callCodexText({ config, prompt });
     return parseTranslationJson(text);
+  }
+  if (provider === DEEPSEEK_PROVIDER) {
+    return callDeepSeekJson({ config, prompt });
   }
 
   return callGemini({ config, prompt });
 }
 
 async function callTranslationText({ config, prompt, signal }) {
-  if (getTranslationProvider(config) === 'codex-oauth') {
+  const provider = getTranslationProvider(config);
+  if (provider === CODEX_PROVIDER) {
     return callCodexText({ config, prompt, signal });
+  }
+  if (provider === DEEPSEEK_PROVIDER) {
+    return callDeepSeekText({ config, prompt, signal });
   }
 
   return callGeminiText({ config, prompt, signal });
@@ -471,6 +498,83 @@ async function callGeminiText({ config, prompt, signal }) {
   return fetchGeminiContent({ config, prompt, signal });
 }
 
+async function callDeepSeekJson({ config, prompt }) {
+  const text = await fetchDeepSeekContent({
+    config,
+    prompt,
+    responseFormat: { type: 'json_object' },
+  });
+  return parseTranslationJson(text);
+}
+
+async function callDeepSeekText({ config, prompt, signal }) {
+  return fetchDeepSeekContent({ config, prompt, signal });
+}
+
+async function fetchDeepSeekContent({ config, prompt, responseFormat, signal }) {
+  return runTranslationRequest(config, DEEPSEEK_PROVIDER, signal, async () => {
+    const timeoutMs = Number(config.deepseekTimeoutMs) || 90_000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
+    const baseUrl = String(config.deepseekBaseUrl || 'https://api.deepseek.com').replace(/\/+$/, '');
+
+    try {
+      const body = {
+        model: getTranslationModel(config),
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a precise translation engine. Follow the user prompt exactly and return only the requested translation output.',
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        stream: false,
+        temperature: 0.2,
+        thinking: { type: 'disabled' },
+        max_tokens: DEEPSEEK_MAX_OUTPUT_TOKENS,
+        ...(responseFormat ? { response_format: responseFormat } : {}),
+      };
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        signal: requestSignal,
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${String(config.deepseekApiKey || '').trim()}`,
+        },
+        body: JSON.stringify(body),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const message =
+          payload?.error?.message ||
+          payload?.error?.code ||
+          `DeepSeek request failed with status ${response.status}`;
+        const error = new Error(message);
+        const retryAt = parseRetryAfter(readRetryAfter(response, payload), new Date());
+        error.retryAfter = retryAt?.toISOString() || null;
+        throw error;
+      }
+
+      const choice = payload?.choices?.[0];
+      if (choice?.finish_reason && choice.finish_reason !== 'stop') {
+        throw new Error(`DeepSeek response stopped with finish_reason ${choice.finish_reason}`);
+      }
+      const text = String(choice?.message?.content || '').trim();
+      if (!text) {
+        throw new Error('DeepSeek returned no text');
+      }
+
+      return text;
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+}
+
 async function callCodexText({ config, prompt, probe = false, signal }) {
   const store = config.translationStore;
   if (!probe && store) {
@@ -541,7 +645,8 @@ async function fetchCodexText({ config, prompt, probe, signal, auth }) {
         payload?.error?.code ||
         `Codex request failed with status ${response.status}`;
       const error = new Error(message);
-      error.retryAfter = readRetryAfter(response, payload);
+      const retryAt = parseRetryAfter(readRetryAfter(response, payload), new Date());
+      error.retryAfter = retryAt?.toISOString() || null;
       throw error;
     }
 
@@ -654,12 +759,14 @@ function parseRetryAfter(value, now) {
     return null;
   }
   const numeric = Number(value);
+  let parsed;
   if (Number.isFinite(numeric) && numeric >= 0) {
-    return numeric > 1_000_000_000
+    parsed = numeric > 1_000_000_000
       ? new Date(numeric * 1000)
       : new Date(now.getTime() + numeric * 1000);
+  } else {
+    parsed = new Date(String(value));
   }
-  const parsed = new Date(String(value));
   return Number.isFinite(parsed.getTime()) ? parsed : null;
 }
 

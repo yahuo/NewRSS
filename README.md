@@ -307,17 +307,27 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
 - `X_BEARER_TOKEN`
   可选，覆盖内置的 X 请求 Bearer Token
 - `TRANSLATION_PROVIDER`
-  可选，翻译 provider，默认 `gemini`；可设为 `codex-oauth` 使用 Codex OAuth 登录态
+  可选，翻译 provider，默认 `gemini`；可设为 `deepseek` 使用 DeepSeek API，或设为 `codex-oauth` 使用 Codex OAuth 登录态
 - `READ_LATER_TRANSLATION_PROVIDER`
   可选，单独指定稍后读翻译 provider；留空时继承 `TRANSLATION_PROVIDER`
 - `GEMINI_API_KEY`
   可选，设置后会自动把英文的 read-later 内容以及开启 `translateEnabled` 的 RSS 源内容翻译为中文
 - `GEMINI_MODEL`
   可选，Gemini 模型名，默认 `gemini-2.5-flash`
+- `GEMINI_CHUNK_MAX_WORDS`
+  所有翻译 provider 共用的单个长文分块词数上限，默认 `1200`
 - `GEMINI_CHUNK_CONCURRENCY`
   单篇长文的 Gemini 分块并发数，默认 `3`
 - `TRANSLATION_REQUEST_CONCURRENCY`
-  Feed 与稍后读共享的单个翻译 provider 请求上限，默认 `6`；Codex 单篇长文最多使用其中 `3` 个槽
+  Feed 与稍后读共享的单个翻译 provider 请求上限，默认 `6`；Codex 和 DeepSeek 单篇长文最多使用其中 `3` 个槽
+- `DEEPSEEK_API_KEY`
+  使用 `deepseek` provider 时所需的 DeepSeek API Key
+- `DEEPSEEK_MODEL`
+  可选，DeepSeek 模型名，默认 `deepseek-v4-flash`；可设为 `deepseek-v4-pro`
+- `DEEPSEEK_BASE_URL`
+  可选，DeepSeek API 基础地址，默认 `https://api.deepseek.com`
+- `DEEPSEEK_TIMEOUT_MS`
+  可选，DeepSeek 单次请求超时，默认 `90000`
 - `CODEX_AUTH_FILE`
   可选，使用 `codex-oauth` 时读取并写回的 Codex auth 文件；直接运行默认 `~/.codex/auth.json`，Compose 示例使用专用的 `/app/data/codex-auth/auth.json`
 - `CODEX_MODEL`
@@ -646,17 +656,27 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
 - `X_BEARER_TOKEN`
   Optional override for the built-in X request bearer token
 - `TRANSLATION_PROVIDER`
-  Optional translation provider, default `gemini`; set to `codex-oauth` to use Codex OAuth credentials
+  Optional translation provider, default `gemini`; set to `deepseek` for the DeepSeek API, or `codex-oauth` to use Codex OAuth credentials
 - `READ_LATER_TRANSLATION_PROVIDER`
   Optional provider override for read-later translation; inherits `TRANSLATION_PROVIDER` when empty
 - `GEMINI_API_KEY`
   Optional. When set, English read-later articles and feeds with `translateEnabled=true` are automatically translated
 - `GEMINI_MODEL`
   Optional Gemini model name, default `gemini-2.5-flash`
+- `GEMINI_CHUNK_MAX_WORDS`
+  Shared per-chunk word limit for all translation providers, default `1200`
 - `GEMINI_CHUNK_CONCURRENCY`
   Per-article Gemini chunk concurrency, default `3`
 - `TRANSLATION_REQUEST_CONCURRENCY`
-  Shared per-provider request limit across feeds and read-later, default `6`; one Codex article uses at most `3` of those slots
+  Shared per-provider request limit across feeds and read-later, default `6`; one Codex or DeepSeek article uses at most `3` of those slots
+- `DEEPSEEK_API_KEY`
+  DeepSeek API key required by the `deepseek` provider
+- `DEEPSEEK_MODEL`
+  Optional DeepSeek model name, default `deepseek-v4-flash`; set to `deepseek-v4-pro` if preferred
+- `DEEPSEEK_BASE_URL`
+  Optional DeepSeek API base URL, default `https://api.deepseek.com`
+- `DEEPSEEK_TIMEOUT_MS`
+  Optional DeepSeek request timeout in milliseconds, default `90000`
 - `CODEX_AUTH_FILE`
   Optional Codex auth file read and updated by `codex-oauth`; direct runs default to `~/.codex/auth.json`, while the Compose example uses dedicated `/app/data/codex-auth/auth.json`
 - `CODEX_MODEL`
@@ -711,7 +731,7 @@ Run `npm test`, `npm run test:coverage`, and `npm audit --omit=dev --registry=ht
 - A few sites may require additional site-specific extraction rules
 - X importing depends on your own authenticated X cookies
 - Some subscriber-only publishers still need you to provide article cookies, otherwise server-side extraction may return `403`
-- Importing or refreshing English content is slower when Gemini translation is enabled
+- Importing or refreshing English content is slower when server-side translation is enabled
 - The current runtime model is a single-process service intended for personal or home use
 - There is no application login or API token; a trusted Ponte/firewall boundary is required
 - Permanent retention requires monitoring database and backup disk growth
