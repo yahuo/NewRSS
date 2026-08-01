@@ -46,6 +46,17 @@ NewRSS 是一个面向 `Reeder` 等 RSS 阅读器的自托管 Reader View 工具
 
 新增或更新源时，可以额外传 `title` 作为管理页、OPML 和输出 Feed 使用的显示标题；新源留空时默认使用 `name`，更新现有源时留空会保留当前标题，后续刷新也不会用上游 RSS 标题覆盖它。也可以传 `translateEnabled: true`，让后续刷新自动把英文正文翻译成中文；没有配置翻译 provider 时会保留原文。
 
+源 URL 除 RSS/Atom 外，也可以使用标准 Google News Sitemap。比如 Reuters 官方新闻 Sitemap：`https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml`。NewRSS 会用其中的文章 URL 抓取正文；开启翻译后，输出方式与普通 RSS 源相同。高频 Sitemap 仍受 `MAX_ITEMS_PER_REFRESH` 限制，应结合刷新间隔评估漏项和翻译调用量。
+
+可在 `.env` 中先按语言和 URL 栏目过滤，再应用每轮条数限制。Reuters 的本地化 URL 语言前缀优先于不完全可靠的 Sitemap 语言字段：
+
+```bash
+NEWS_SITEMAP_LANGUAGES=en
+NEWS_SITEMAP_SECTIONS=world,business,technology,markets
+```
+
+Reuters 的滚动 Sitemap 每页最多 50 条，近期实测只覆盖约 30–40 分钟。为了降低滚动窗口和每轮截断造成的漏项风险，可设置 `MAX_ITEMS_PER_REFRESH=50`，并保持 `REFRESH_INTERVAL_MINUTES` 不超过 `30`；这会增加正文抓取和翻译调用量。
+
 ## 快速开始
 
 ### 本地运行
@@ -342,6 +353,8 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
   每次刷新最多处理多少条，默认 `10`
 - `MAX_ITEMS_PER_FEED`
   每次生成的 RSS 最多输出多少条，默认 `50`；不删除数据库历史
+- `NEWS_SITEMAP_LANGUAGES` / `NEWS_SITEMAP_SECTIONS`
+  News Sitemap 语言和 URL 栏目白名单，逗号分隔；默认空表示不过滤
 - `FEED_REFRESH_CONCURRENCY` / `ITEM_REFRESH_CONCURRENCY`
   Feed 和文章的有界刷新并发，默认 `2` / `3`
 - `ARTICLE_RECHECK_HOURS`
@@ -443,6 +456,18 @@ The default mode is “extract original content, no server-side translation”:
 - Export OPML: `GET /opml.xml`
 
 When creating or updating a feed, you can additionally send `title` as the display title used by the admin page, OPML, and the generated feed. A new feed defaults to `name` when the title is blank; an existing feed keeps its current title when the value is blank, and refreshes do not overwrite it with the upstream RSS title. You can also send `translateEnabled: true` to automatically translate English article content on future refreshes; if no translation provider is configured, the original content is kept.
+
+Feed URLs may also use the standard Google News Sitemap format. For example, Reuters publishes `https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml`. NewRSS fetches each discovered article body and applies the same optional translation flow used for ordinary RSS feeds. High-volume sitemaps still obey `MAX_ITEMS_PER_REFRESH`, so choose the refresh interval and translation budget accordingly.
+
+Filter languages and URL sections before the per-refresh item limit by setting:
+
+```bash
+NEWS_SITEMAP_LANGUAGES=en
+NEWS_SITEMAP_SECTIONS=world,business,technology,markets
+```
+
+For Reuters, localized URL prefixes take precedence over the site's unreliable Sitemap language metadata.
+Reuters exposes up to 50 entries in its rolling Sitemap page, which recently represented only about 30–40 minutes. To reduce losses from the rolling window and per-refresh limit, set `MAX_ITEMS_PER_REFRESH=50` and keep `REFRESH_INTERVAL_MINUTES` at `30` or lower, after accounting for the additional article-fetch and translation volume.
 
 ## Quick Start
 
@@ -691,6 +716,8 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
   Max items processed per refresh, default `10`
 - `MAX_ITEMS_PER_FEED`
   Max items emitted per RSS response, default `50`; stored history is not deleted
+- `NEWS_SITEMAP_LANGUAGES` / `NEWS_SITEMAP_SECTIONS`
+  Comma-separated News Sitemap language and URL-section allowlists; empty values disable filtering
 - `FEED_REFRESH_CONCURRENCY` / `ITEM_REFRESH_CONCURRENCY`
   Bounded feed/article refresh concurrency, defaults `2` / `3`
 - `ARTICLE_RECHECK_HOURS`

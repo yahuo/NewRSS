@@ -38,6 +38,11 @@ const optionalHttpUrl = (name) => {
   return parsed.toString().replace(/\/$/, '');
 };
 
+const lowercaseList = (name) => String(process.env[name] || '')
+  .split(',')
+  .map((value) => value.trim().toLowerCase())
+  .filter(Boolean);
+
 const DEFAULT_ARTICLE_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
 
@@ -57,6 +62,8 @@ const config = {
   appBaseUrl: optionalHttpUrl('APP_BASE_URL'),
   maxItemsPerRefresh: boundedInteger('MAX_ITEMS_PER_REFRESH', 10, { min: 1, max: 500 }),
   maxItemsPerFeed: boundedInteger('MAX_ITEMS_PER_FEED', 50, { min: 1, max: 5000 }),
+  newsSitemapLanguages: lowercaseList('NEWS_SITEMAP_LANGUAGES'),
+  newsSitemapSections: lowercaseList('NEWS_SITEMAP_SECTIONS'),
   refreshIntervalMinutes: boundedInteger('REFRESH_INTERVAL_MINUTES', 30, { min: 0, max: 10080 }),
   httpTimeoutMs: boundedInteger('HTTP_TIMEOUT_MS', 15000, { min: 1000, max: 300000 }),
   rssMaxBytes: boundedInteger('RSS_MAX_BYTES', 10 * 1024 * 1024, { min: 64 * 1024, max: 100 * 1024 * 1024 }),

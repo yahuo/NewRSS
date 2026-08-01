@@ -114,3 +114,37 @@ test('fake-IP compatibility is opt-in and only exact true enables it', () => {
     assert.equal(result.stdout, expected);
   }
 });
+
+test('News Sitemap filters normalize comma-separated languages and sections', () => {
+  const result = spawnSync(
+    process.execPath,
+    ['-e', "const c=require('./src/config'); process.stdout.write(JSON.stringify([c.newsSitemapLanguages,c.newsSitemapSections]))"],
+    {
+      cwd: projectRoot,
+      env: {
+        ...process.env,
+        NEWS_SITEMAP_LANGUAGES: ' EN, pt ',
+        NEWS_SITEMAP_SECTIONS: ' world, BUSINESS, technology, markets ',
+      },
+      encoding: 'utf8',
+    }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), [
+    ['en', 'pt'],
+    ['world', 'business', 'technology', 'markets'],
+  ]);
+
+  const defaultEnv = { ...process.env };
+  delete defaultEnv.NEWS_SITEMAP_LANGUAGES;
+  delete defaultEnv.NEWS_SITEMAP_SECTIONS;
+  const defaults = spawnSync(
+    process.execPath,
+    ['-e', "const c=require('./src/config'); process.stdout.write(JSON.stringify([c.newsSitemapLanguages,c.newsSitemapSections]))"],
+    { cwd: projectRoot, env: defaultEnv, encoding: 'utf8' }
+  );
+
+  assert.equal(defaults.status, 0, defaults.stderr);
+  assert.deepEqual(JSON.parse(defaults.stdout), [[], []]);
+});

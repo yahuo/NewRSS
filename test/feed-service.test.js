@@ -341,6 +341,92 @@ test('refresh skips New York Times live items before applying the item limit', a
   assert.equal(entries[0].source_url, 'https://www.nytimes.com/2026/07/20/world/regular-article.html');
 });
 
+test('News Sitemap entries fetch article bodies and publish translated RSS content', async (t) => {
+  const { db, directory, service } = createService();
+  const originalFetch = global.fetch;
+  const sourceUrl = 'https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml';
+  const articleUrl = 'https://www.reuters.com/world/example-story-2026-08-01/';
+  let articleFetchCount = 0;
+
+  t.after(() => {
+    global.fetch = originalFetch;
+    db.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  service.saveFeed({
+    name: 'Reuters',
+    sourceUrl,
+    folder: 'News',
+    title: 'Reuters',
+    translateEnabled: true,
+  });
+  service.config.outboundAllowedHosts = ['www.reuters.com'];
+  service.config.maxItemsPerRefresh = 1;
+  service.config.newsSitemapLanguages = ['en'];
+  service.config.newsSitemapSections = ['world'];
+  service.fetchSourceFeed = async (requestedUrl) => {
+    assert.equal(requestedUrl, sourceUrl);
+    return `<?xml version="1.0" encoding="UTF-8"?>
+      <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+        <url>
+          <loc>https://www.reuters.com/sports/excluded-story-2026-08-01/</loc>
+          <news:news>
+            <news:publication><news:name>Reuters</news:name><news:language>en</news:language></news:publication>
+            <news:publication_date>2026-08-01T01:03:03.000Z</news:publication_date>
+            <news:title>Excluded sports story</news:title>
+          </news:news>
+        </url>
+        <url>
+          <loc>${articleUrl}</loc>
+          <news:news>
+            <news:publication><news:name>Reuters</news:name><news:language>en</news:language></news:publication>
+            <news:publication_date>2026-08-01T01:02:03.000Z</news:publication_date>
+            <news:title>Example Reuters story</news:title>
+          </news:news>
+        </url>
+      </urlset>`;
+  };
+  global.fetch = async (url) => {
+    articleFetchCount += 1;
+    assert.equal(url.toString(), articleUrl);
+    return new Response(`<!doctype html><html><head><title>Example Reuters story</title></head><body>
+      <article><h1>Example Reuters story</h1><p>${'Complete Reuters article paragraph. '.repeat(40)}</p></article>
+    </body></html>`, { status: 200 });
+  };
+  service.translationService.shouldTranslate = () => true;
+  service.translationService.translateArticle = async ({ sourceTitle, contentHtml, sourceUrl: translatedSourceUrl }) => {
+    assert.equal(sourceTitle, 'Example Reuters story');
+    assert.equal(translatedSourceUrl, articleUrl);
+    assert.match(contentHtml, /Complete Reuters article paragraph/);
+    return {
+      translatedTitle: '路透社示例报道',
+      translatedContentHtml: '<p>完整的中文译文。</p>',
+      provider: 'test',
+    };
+  };
+
+  const result = await service.refreshStoredFeed({
+    parser: { parseString: () => { throw new Error('RSS parser should not receive a News Sitemap'); } },
+    feedName: 'Reuters',
+  });
+  const [entry] = db.listEntriesByFeed('Reuters', 10);
+  const xml = service.renderFeedXml({
+    request: { get: () => 'newrss.local:8787', protocol: 'http' },
+    feedName: 'Reuters',
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.equal(articleFetchCount, 1);
+  assert.equal(entry.source_url, articleUrl);
+  assert.equal(entry.source_published_at, '2026-08-01T01:02:03.000Z');
+  assert.equal(entry.translated_title, '路透社示例报道');
+  assert.equal(entry.translation_provider, 'readability+test');
+  assert.match(xml, /路透社示例报道/);
+  assert.match(xml, /完整的中文译文/);
+});
+
 test('scheduled and manual refreshes do not overlap', async (t) => {
   const { db, directory, service } = createService();
   t.after(() => {

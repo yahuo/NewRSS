@@ -2,6 +2,7 @@ const RSS = require('rss');
 const { isNewYorkTimesLiveUrl } = require('./article-strategies');
 const { resolveArticleContent } = require('./extractor');
 const { sanitizeHtml } = require('./html-sanitizer');
+const { parseNewsSitemap } = require('./news-sitemap');
 const { fetchText } = require('./outbound-http');
 const TranslationService = require('./translation-service');
 const TranslationRequestPool = require('./translation-request-pool');
@@ -66,7 +67,10 @@ class FeedService {
 
   async parseSourceFeed(parser, sourceUrl) {
     const xml = await this.fetchSourceFeed(sourceUrl);
-    return parser.parseString(xml);
+    return parseNewsSitemap(xml, sourceUrl, {
+      languages: this.config.newsSitemapLanguages,
+      sections: this.config.newsSitemapSections,
+    }) || parser.parseString(xml);
   }
 
   ensureBootstrapFeed() {
