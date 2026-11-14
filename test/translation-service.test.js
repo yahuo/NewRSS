@@ -1540,3 +1540,52 @@ function createCodexFixture(t, overrides = {}) {
     },
   };
 }
+
+test('article translation sends attribute-free html and restores image and link attributes', async () => {
+  const prompts = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (_url, options) => {
+    const prompt = JSON.parse(options.body).messages[1].content;
+    prompts.push(prompt);
+    const html = prompt.slice(prompt.indexOf('HTML:\n') + 'HTML:\n'.length);
+    return jsonResponse({
+      choices: [{
+        finish_reason: 'stop',
+        message: {
+          content: JSON.stringify({
+            translatedTitle: '礼物指南',
+            translatedContentHtml: html.replace('A gift every reader will love here.', '每位读者都会喜欢的礼物。'),
+          }),
+        },
+      }],
+    });
+  };
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'openai',
+      openaiApiKey: 'openai-test-key',
+      openaiModel: 'gpt-test',
+      openaiTimeoutMs: 5_000,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+    const srcset = Array.from({ length: 8 }, (_, index) => `https://cdn.example/gift-${index}.jpg ${index + 1}x`).join(', ');
+
+    const translated = await service.translateArticle({
+      sourceTitle: 'Gift guide',
+      sourceUrl: 'https://example.com/gifts',
+      contentHtml: `<p><img src="https://cdn.example/gift.jpg" srcset="${srcset}" loading="lazy"></p><p><a href="https://shop.example/gift">A gift every reader will love here.</a></p>`,
+    });
+
+    assert.equal(prompts.length, 1);
+    assert.doesNotMatch(prompts[0], /cdn\.example|shop\.example|srcset/);
+    assert.match(prompts[0], /data-k attribute/);
+    assert.equal(
+      translated.translatedContentHtml,
+      `<p><img src="https://cdn.example/gift.jpg" srcset="${srcset}" loading="lazy"></p><p><a href="https://shop.example/gift">每位读者都会喜欢的礼物。</a></p>`
+    );
+    assert.equal(translated.translatedTitle, '礼物指南');
+  } finally {
+    global.fetch = previousFetch;
+  }
+});

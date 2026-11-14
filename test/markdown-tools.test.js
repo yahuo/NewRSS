@@ -178,6 +178,18 @@ test('HTML chunking preserves nested wrappers around split text', () => {
   assert.match(wrapped, /word-229/);
 });
 
+test('HTML chunking also limits chunk size for tag-dense content with few words', () => {
+  const gallery = Array.from({ length: 400 }, (_, index) => `<p><img data-k="${index}"></p><p>Look ${index}</p>`).join('');
+  const plan = buildHtmlTranslationPlan(`<div>${gallery}</div>`, { maxWords: 1_200, maxChars: 4_000 });
+
+  assert.ok(plan.chunks.length >= 4);
+  assert.ok(plan.chunks.every((chunk) => chunk.length <= 4_000));
+  const wrapped = plan.wrap(plan.chunks.join(''));
+  assert.equal(wrapped.match(/<img /g).length, 400);
+  assert.match(wrapped, /^<div><p><img data-k="0"><\/p>/);
+  assert.match(wrapped, /Look 399<\/p><\/div>$/);
+});
+
 test('HTML chunking keeps ordinary elements, loose text, and preformatted blocks intact', () => {
   const plan = buildHtmlTranslationPlan('lead &amp; tail <p>small body</p><img src="cover.jpg"><pre>one   two</pre>', {
     maxWords: 200,
