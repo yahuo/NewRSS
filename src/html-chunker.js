@@ -2,10 +2,17 @@ const { JSDOM } = require('jsdom');
 const { stripHtml } = require('./utils');
 
 const WRAPPER_TAGS = new Set(['div', 'article', 'section', 'main']);
+// 标签密集的页面（如图集）词数不多但 HTML 很长，模型需原样输出全部标签，
+// 只按词数分块会让单块请求超时，因此同时限制每块字符数。
+const DEFAULT_MAX_CHARS = 12_000;
+const FRAGMENT_SEPARATOR = '\n\n';
 
-function buildHtmlTranslationPlan(html, { maxWords = 1200 } = {}) {
+function buildHtmlTranslationPlan(html, { maxWords = 1200, maxChars = DEFAULT_MAX_CHARS } = {}) {
   const rawHtml = String(html || '').trim();
-  const normalizedMaxWords = normalizeMaxWords(maxWords);
+  const limits = {
+    maxWords: normalizeMaxWords(maxWords),
+    maxChars: normalizeMaxChars(maxChars),
+  };
   if (!rawHtml) {
     return {
       chunks: [],
@@ -23,7 +30,7 @@ function buildHtmlTranslationPlan(html, { maxWords = 1200 } = {}) {
     root = root.firstElementChild;
   }
 
-  const fragments = listMeaningfulFragments(root.childNodes, normalizedMaxWords);
+  const fragments = listMeaningfulFragments(root.childNodes, limits);
 
   if (!fragments.length) {
     return {
@@ -33,7 +40,7 @@ function buildHtmlTranslationPlan(html, { maxWords = 1200 } = {}) {
   }
 
   return {
-    chunks: groupFragments(fragments, normalizedMaxWords),
+    chunks: groupFragments(fragments, limits),
     wrap: createWrapper(wrappers),
   };
 }
@@ -60,18 +67,18 @@ function listMeaningfulNodes(nodes) {
   });
 }
 
-function listMeaningfulFragments(nodes, maxWords) {
-  return listMeaningfulNodes(nodes).flatMap((node) => splitMeaningfulNode(node, maxWords));
+function listMeaningfulFragments(nodes, limits) {
+  return listMeaningfulNodes(nodes).flatMap((node) => splitMeaningfulNode(node, limits));
 }
 
-function splitMeaningfulNode(node, maxWords) {
+function splitMeaningfulNode(node, limits) {
   const serialized = serializeNode(node);
   if (!serialized) {
     return [];
   }
 
   if (node.nodeType === 3) {
-    return splitText(node.textContent, maxWords).map(escapeHtml);
+    return splitText(node.textContent, limits.maxWords).map(escapeHtml);
   }
 
   if (node.nodeType !== 1) {
@@ -83,17 +90,17 @@ function splitMeaningfulNode(node, maxWords) {
   }
 
   const wordCount = countWords(stripHtml(serialized));
-  if (wordCount <= maxWords) {
+  if (wordCount <= limits.maxWords && serialized.length <= limits.maxChars) {
     return [serialized];
   }
 
-  const childFragments = listMeaningfulFragments(node.childNodes, maxWords);
+  const childFragments = listMeaningfulFragments(node.childNodes, limits);
   if (!childFragments.length) {
     return [];
   }
 
   const wrapper = createWrapper([node.cloneNode(false)]);
-  return groupFragments(childFragments, maxWords).map((chunk) => wrapper(chunk)).filter(Boolean);
+  return groupFragments(childFragments, limits).map((chunk) => wrapper(chunk)).filter(Boolean);
 }
 
 function splitText(value, maxWords) {
@@ -135,27 +142,33 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function groupFragments(fragments, maxWords) {
-  const normalizedMaxWords = normalizeMaxWords(maxWords);
+function groupFragments(fragments, { maxWords, maxChars }) {
   const chunks = [];
   let currentFragments = [];
   let currentWords = 0;
+  let currentChars = 0;
 
   for (const fragment of fragments) {
     const fragmentWords = countWords(stripHtml(fragment));
+    const fragmentChars = fragment.length + FRAGMENT_SEPARATOR.length;
 
-    if (currentFragments.length && currentWords + fragmentWords > normalizedMaxWords) {
-      chunks.push(currentFragments.join('\n\n').trim());
+    if (
+      currentFragments.length &&
+      (currentWords + fragmentWords > maxWords || currentChars + fragmentChars > maxChars)
+    ) {
+      chunks.push(currentFragments.join(FRAGMENT_SEPARATOR).trim());
       currentFragments = [];
       currentWords = 0;
+      currentChars = 0;
     }
 
     currentFragments.push(fragment);
     currentWords += fragmentWords;
+    currentChars += fragmentChars;
   }
 
   if (currentFragments.length) {
-    chunks.push(currentFragments.join('\n\n').trim());
+    chunks.push(currentFragments.join(FRAGMENT_SEPARATOR).trim());
   }
 
   return chunks.filter(Boolean);
@@ -163,6 +176,10 @@ function groupFragments(fragments, maxWords) {
 
 function normalizeMaxWords(maxWords) {
   return Math.max(200, Number.parseInt(maxWords, 10) || 1200);
+}
+
+function normalizeMaxChars(maxChars) {
+  return Math.max(2_000, Number.parseInt(maxChars, 10) || DEFAULT_MAX_CHARS);
 }
 
 function countWords(text) {

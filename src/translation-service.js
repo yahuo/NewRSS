@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { buildHtmlTranslationPlan } = require('./html-chunker');
+const { STASH_ATTRIBUTE, stashHtmlAttributes } = require('./html-attribute-stash');
 const { renderMarkdown } = require('./markdown-renderer');
 const { chunkMarkdown } = require('./markdown-chunker');
 const TranslationRequestPool = require('./translation-request-pool');
@@ -82,11 +83,28 @@ class TranslationService {
     }
 
     const title = String(sourceTitle || '').trim();
-    const html = String(contentHtml || '').trim();
-    if (!html) {
+    const sourceHtml = String(contentHtml || '').trim();
+    if (!sourceHtml) {
       return null;
     }
 
+    const stashed = stashHtmlAttributes(sourceHtml);
+    const translation = await this.translateStashedArticle({
+      title,
+      html: stashed.html,
+      sourceUrl,
+    });
+    if (!translation) {
+      return null;
+    }
+
+    return {
+      ...translation,
+      translatedContentHtml: stashed.restore(translation.translatedContentHtml),
+    };
+  }
+
+  async translateStashedArticle({ title, html, sourceUrl }) {
     const htmlPlan = buildHtmlTranslationPlan(html, {
       maxWords: this.config.translationChunkMaxWords || DEFAULT_CHUNK_MAX_WORDS,
     });
@@ -1072,6 +1090,7 @@ function buildTranslationPrompt({ title, contentHtml, sourceUrl, targetLanguage 
     'Requirements:',
     '- Preserve the HTML structure and tags.',
     '- Preserve all href, src, and other URL attribute values unchanged.',
+    `- Keep every ${STASH_ATTRIBUTE} attribute and its value unchanged on the same element.`,
     '- Translate visible text naturally for readers, not literally word-by-word.',
     '- Do not add wrappers like html/body/main/section unless already present.',
     '- Keep code, URLs, proper nouns, and publication names when appropriate.',
@@ -1113,6 +1132,7 @@ function buildHtmlChunkPrompt({ sourceTitle, sourceUrl, html, chunkIndex, chunkC
     'Rules:',
     '- Preserve valid HTML tags and the overall fragment structure.',
     '- Preserve every href, src, and other URL attribute value unchanged.',
+    `- Keep every ${STASH_ATTRIBUTE} attribute and its value unchanged on the same element.`,
     '- Translate visible prose naturally for readers; do not explain your work.',
     '- Do not add markdown fences or extra wrapper elements.',
     '- Keep code, URLs, proper nouns, and publication names when appropriate.',
