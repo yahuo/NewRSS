@@ -7,7 +7,15 @@ updates:
     groups:
       production-dependencies:
         dependency-type: production
+    # 大版本升级需要适配代码，手动处理；安全更新不受影响
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    # Node 大版本只手动升级到 LTS
+    ignore:
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
