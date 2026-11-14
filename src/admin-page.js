@@ -583,7 +583,7 @@ function renderAdminPage({ feeds, folders = [], baseUrl, readLaterFeedName }) {
             </label>
             <button class="primary" type="submit">保存源</button>
             <div class="hint">名称为空时，会根据 URL 自动生成一个 slug；显示标题只用于管理页、OPML 和输出 Feed。更新现有源时，显示标题留空会保留当前值。</div>
-            <div class="hint">勾选后，后续刷新这个 RSS 源时会自动把英文正文翻译成中文；需要配置 Gemini API key 或 Codex OAuth。</div>
+            <div class="hint">勾选后，后续刷新这个 RSS 源时会自动把英文正文翻译成中文；需要配置 OpenAI 格式 API、Anthropic 格式 API 或 Codex OAuth。</div>
             <div class="status" id="status" role="status" aria-live="polite"></div>
           </form>
           <hr class="section-divider" />

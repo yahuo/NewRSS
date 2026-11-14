@@ -16,7 +16,7 @@ const createService = () => {
     appBaseUrl: '',
     defaultFeedName: '',
     defaultFeedUrl: '',
-    geminiApiKey: '',
+    openaiApiKey: '',
     httpTimeoutMs: 5_000,
     maxItemsPerFeed: 50,
     maxItemsPerRefresh: 10,

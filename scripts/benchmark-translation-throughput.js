@@ -31,8 +31,7 @@ async function main() {
       codexBaseUrl: 'https://benchmark.invalid/backend-api/codex',
       codexModel: 'openai-codex/benchmark-model',
       codexTimeoutMs: 5_000,
-      geminiChunkMaxWords: 200,
-      geminiChunkConcurrency: options.concurrency,
+      translationChunkMaxWords: 200,
       translationRequestConcurrency: options.concurrency,
       translateTargetLanguage: 'Simplified Chinese',
     });

@@ -318,31 +318,43 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
 - `X_BEARER_TOKEN`
   可选，覆盖内置的 X 请求 Bearer Token
 - `TRANSLATION_PROVIDER`
-  可选，翻译 provider，默认 `gemini`；可设为 `deepseek` 使用 DeepSeek API，或设为 `codex-oauth` 使用 Codex OAuth 登录态
+  可选，翻译接入方式，默认 `openai`。只支持三种：`openai`（OpenAI Chat Completions 格式 API）、`anthropic`（Anthropic Messages 格式 API）、`codex-oauth`（Codex auth.json 登录态）。Gemini、DeepSeek 或 CLIProxyAPI 等请使用 `openai` 并配置其 OpenAI 兼容地址；旧值 `gemini`、`deepseek` 会在启动时报错
 - `READ_LATER_TRANSLATION_PROVIDER`
-  可选，单独指定稍后读翻译 provider；留空时继承 `TRANSLATION_PROVIDER`
-- `GEMINI_API_KEY`
-  可选，设置后会自动把英文的 read-later 内容以及开启 `translateEnabled` 的 RSS 源内容翻译为中文
-- `GEMINI_MODEL`
-  可选，Gemini 模型名，默认 `gemini-2.5-flash`
-- `GEMINI_CHUNK_MAX_WORDS`
-  所有翻译 provider 共用的单个长文分块词数上限，默认 `1200`
-- `GEMINI_CHUNK_CONCURRENCY`
-  单篇长文的 Gemini 分块并发数，默认 `3`
+  可选，单独指定稍后读翻译接入方式；留空时继承 `TRANSLATION_PROVIDER`
+- `READ_LATER_TRANSLATION_MODEL`
+  可选，单独指定稍后读翻译模型，覆盖所用接入方式的模型变量
+- `TRANSLATION_CHUNK_MAX_WORDS`
+  所有接入方式共用的单个长文分块词数上限，默认 `1200`；未设置时兼容读取旧的 `GEMINI_CHUNK_MAX_WORDS`
 - `TRANSLATION_REQUEST_CONCURRENCY`
-  Feed 与稍后读共享的单个翻译 provider 请求上限，默认 `6`；Codex 和 DeepSeek 单篇长文最多使用其中 `3` 个槽
-- `DEEPSEEK_API_KEY`
-  使用 `deepseek` provider 时所需的 DeepSeek API Key
-- `DEEPSEEK_MODEL`
-  可选，DeepSeek 模型名，默认 `deepseek-v4-flash`；可设为 `deepseek-v4-pro`
-- `DEEPSEEK_BASE_URL`
-  可选，DeepSeek API 基础地址，默认 `https://api.deepseek.com`
-- `DEEPSEEK_TIMEOUT_MS`
-  可选，DeepSeek 单次请求超时，默认 `90000`
+  Feed 与稍后读共享的单个翻译 provider 请求上限，默认 `6`；单篇长文最多使用其中 `3` 个槽
+- `OPENAI_API_KEY`
+  使用 `openai` 时所需的 API Key，以 `Authorization: Bearer` 发送；配置 Key 和模型后会自动翻译英文稍后读内容以及开启 `translateEnabled` 的 RSS 源
+- `OPENAI_BASE_URL`
+  可选，OpenAI 格式 API 基础地址，默认 `https://api.openai.com/v1`，请求 `{OPENAI_BASE_URL}/chat/completions`；例如 DeepSeek 用 `https://api.deepseek.com/v1`，Gemini 用 `https://generativelanguage.googleapis.com/v1beta/openai`
+- `OPENAI_MODEL`
+  使用 `openai` 时必填的模型名，未设置时不启用翻译
+- `OPENAI_TIMEOUT_MS`
+  可选，单次请求超时，默认 `90000`
+- `OPENAI_EXTRA_BODY`
+  可选，合并进请求体的 JSON 对象，用于服务商特有参数，例如 DeepSeek 的 `{"thinking":{"type":"disabled"},"max_tokens":384000}`；不能覆盖 `model`、`messages`、`stream`、`response_format`
+- `ANTHROPIC_API_KEY`
+  使用 `anthropic` 时所需的 API Key，以 `x-api-key` 发送
+- `ANTHROPIC_BASE_URL`
+  可选，Anthropic 格式 API 基础地址，默认 `https://api.anthropic.com`，请求 `{ANTHROPIC_BASE_URL}/v1/messages`（末尾带 `/v1` 也可）
+- `ANTHROPIC_MODEL`
+  可选，模型名，默认 `claude-opus-5-5`
+- `ANTHROPIC_MAX_TOKENS`
+  可选，单次请求的 `max_tokens`，默认 `16000`
+- `ANTHROPIC_TIMEOUT_MS`
+  可选，单次请求超时，默认 `90000`
+- `ANTHROPIC_EXTRA_BODY`
+  可选，合并进请求体的 JSON 对象；不能覆盖 `model`、`max_tokens`、`system`、`messages`、`stream`
 - `CODEX_AUTH_FILE`
   可选，使用 `codex-oauth` 时读取并写回的 Codex auth 文件；直接运行默认 `~/.codex/auth.json`，Compose 示例使用专用的 `/app/data/codex-auth/auth.json`
 - `CODEX_MODEL`
   可选，Codex OAuth 模型名，默认 `openai-codex/gpt-5.5`
+- `CODEX_TIMEOUT_MS`
+  可选，Codex 单次请求超时，默认 `90000`
 - `TRANSLATE_TARGET_LANGUAGE`
   可选，目标语言，默认 `Simplified Chinese`
 - `REFRESH_INTERVAL_MINUTES`
@@ -681,31 +693,43 @@ ARTICLE_COOKIE_HEADER="NYT-S=...; nyt-a=..."
 - `X_BEARER_TOKEN`
   Optional override for the built-in X request bearer token
 - `TRANSLATION_PROVIDER`
-  Optional translation provider, default `gemini`; set to `deepseek` for the DeepSeek API, or `codex-oauth` to use Codex OAuth credentials
+  Optional translation access mode, default `openai`. Exactly three are supported: `openai` (OpenAI Chat Completions format API), `anthropic` (Anthropic Messages format API), and `codex-oauth` (Codex auth.json credentials). Use `openai` with an OpenAI-compatible base URL for Gemini, DeepSeek, CLIProxyAPI, and similar services; the removed values `gemini` and `deepseek` fail at startup
 - `READ_LATER_TRANSLATION_PROVIDER`
-  Optional provider override for read-later translation; inherits `TRANSLATION_PROVIDER` when empty
-- `GEMINI_API_KEY`
-  Optional. When set, English read-later articles and feeds with `translateEnabled=true` are automatically translated
-- `GEMINI_MODEL`
-  Optional Gemini model name, default `gemini-2.5-flash`
-- `GEMINI_CHUNK_MAX_WORDS`
-  Shared per-chunk word limit for all translation providers, default `1200`
-- `GEMINI_CHUNK_CONCURRENCY`
-  Per-article Gemini chunk concurrency, default `3`
+  Optional access mode override for read-later translation; inherits `TRANSLATION_PROVIDER` when empty
+- `READ_LATER_TRANSLATION_MODEL`
+  Optional model override for read-later translation; replaces the model variable of the access mode in use
+- `TRANSLATION_CHUNK_MAX_WORDS`
+  Shared per-chunk word limit for all access modes, default `1200`; falls back to the legacy `GEMINI_CHUNK_MAX_WORDS` when unset
 - `TRANSLATION_REQUEST_CONCURRENCY`
-  Shared per-provider request limit across feeds and read-later, default `6`; one Codex or DeepSeek article uses at most `3` of those slots
-- `DEEPSEEK_API_KEY`
-  DeepSeek API key required by the `deepseek` provider
-- `DEEPSEEK_MODEL`
-  Optional DeepSeek model name, default `deepseek-v4-flash`; set to `deepseek-v4-pro` if preferred
-- `DEEPSEEK_BASE_URL`
-  Optional DeepSeek API base URL, default `https://api.deepseek.com`
-- `DEEPSEEK_TIMEOUT_MS`
-  Optional DeepSeek request timeout in milliseconds, default `90000`
+  Shared per-provider request limit across feeds and read-later, default `6`; one long article uses at most `3` of those slots
+- `OPENAI_API_KEY`
+  API key for `openai`, sent as `Authorization: Bearer`; with a key and model set, English read-later articles and feeds with `translateEnabled=true` are translated automatically
+- `OPENAI_BASE_URL`
+  Optional OpenAI-format API base URL, default `https://api.openai.com/v1`; requests go to `{OPENAI_BASE_URL}/chat/completions`. For example, DeepSeek uses `https://api.deepseek.com/v1` and Gemini uses `https://generativelanguage.googleapis.com/v1beta/openai`
+- `OPENAI_MODEL`
+  Model name, required for `openai`; translation stays disabled when it is empty
+- `OPENAI_TIMEOUT_MS`
+  Optional request timeout in milliseconds, default `90000`
+- `OPENAI_EXTRA_BODY`
+  Optional JSON object merged into the request body for provider-specific parameters, such as DeepSeek's `{"thinking":{"type":"disabled"},"max_tokens":384000}`; it cannot override `model`, `messages`, `stream`, or `response_format`
+- `ANTHROPIC_API_KEY`
+  API key for `anthropic`, sent as `x-api-key`
+- `ANTHROPIC_BASE_URL`
+  Optional Anthropic-format API base URL, default `https://api.anthropic.com`; requests go to `{ANTHROPIC_BASE_URL}/v1/messages` (a trailing `/v1` is accepted)
+- `ANTHROPIC_MODEL`
+  Optional model name, default `claude-opus-5-5`
+- `ANTHROPIC_MAX_TOKENS`
+  Optional `max_tokens` per request, default `16000`
+- `ANTHROPIC_TIMEOUT_MS`
+  Optional request timeout in milliseconds, default `90000`
+- `ANTHROPIC_EXTRA_BODY`
+  Optional JSON object merged into the request body; it cannot override `model`, `max_tokens`, `system`, `messages`, or `stream`
 - `CODEX_AUTH_FILE`
   Optional Codex auth file read and updated by `codex-oauth`; direct runs default to `~/.codex/auth.json`, while the Compose example uses dedicated `/app/data/codex-auth/auth.json`
 - `CODEX_MODEL`
   Optional Codex OAuth model name, default `openai-codex/gpt-5.5`
+- `CODEX_TIMEOUT_MS`
+  Optional Codex request timeout in milliseconds, default `90000`
 - `TRANSLATE_TARGET_LANGUAGE`
   Optional target language, default `Simplified Chinese`
 - `REFRESH_INTERVAL_MINUTES`

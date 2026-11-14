@@ -43,6 +43,40 @@ const lowercaseList = (name) => String(process.env[name] || '')
   .map((value) => value.trim().toLowerCase())
   .filter(Boolean);
 
+const TRANSLATION_PROVIDERS = ['openai', 'anthropic', 'codex-oauth'];
+
+const translationProvider = (name, fallback) => {
+  const raw = String(process.env[name] || '').trim().toLowerCase();
+  if (!raw) {
+    return fallback;
+  }
+  if (!TRANSLATION_PROVIDERS.includes(raw)) {
+    throw new Error(
+      `${name} must be one of ${TRANSLATION_PROVIDERS.join(', ')}; ` +
+        'use openai with an OpenAI-compatible base URL for Gemini, DeepSeek or other providers'
+    );
+  }
+  return raw;
+};
+
+const optionalJsonObject = (name) => {
+  const raw = String(process.env[name] || '').trim();
+  if (!raw) {
+    return null;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${name} must be a JSON object`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${name} must be a JSON object`);
+  }
+  return parsed;
+};
+
 const DEFAULT_ARTICLE_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
 
@@ -95,22 +129,30 @@ const config = {
   xUserAgent: process.env.X_USER_AGENT || '',
   xBearerToken: process.env.X_BEARER_TOKEN || '',
   xClientTransactionId: process.env.X_CLIENT_TRANSACTION_ID || '',
-  translationProvider: process.env.TRANSLATION_PROVIDER || 'gemini',
-  readLaterTranslationProvider: process.env.READ_LATER_TRANSLATION_PROVIDER || '',
-  geminiApiKey: process.env.GEMINI_API_KEY || '',
-  geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-  geminiTimeoutMs: boundedInteger('GEMINI_TIMEOUT_MS', 90000, { min: 1000, max: 600000 }),
-  geminiChunkMaxWords: boundedInteger('GEMINI_CHUNK_MAX_WORDS', 1200, { min: 200, max: 10000 }),
-  geminiChunkConcurrency: boundedInteger('GEMINI_CHUNK_CONCURRENCY', 3, { min: 1, max: 8 }),
+  translationProvider: translationProvider('TRANSLATION_PROVIDER', 'openai'),
+  readLaterTranslationProvider: translationProvider('READ_LATER_TRANSLATION_PROVIDER', ''),
+  readLaterTranslationModel: String(process.env.READ_LATER_TRANSLATION_MODEL || '').trim(),
+  translationChunkMaxWords: boundedInteger(
+    'TRANSLATION_CHUNK_MAX_WORDS',
+    boundedInteger('GEMINI_CHUNK_MAX_WORDS', 1200, { min: 200, max: 10000 }),
+    { min: 200, max: 10000 }
+  ),
   translationRequestConcurrency: boundedInteger('TRANSLATION_REQUEST_CONCURRENCY', 6, { min: 1, max: 8 }),
-  deepseekApiKey: process.env.DEEPSEEK_API_KEY || '',
-  deepseekModel: process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash',
-  deepseekBaseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
-  deepseekTimeoutMs: boundedInteger('DEEPSEEK_TIMEOUT_MS', 90000, { min: 1000, max: 600000 }),
+  openaiApiKey: process.env.OPENAI_API_KEY || '',
+  openaiBaseUrl: optionalHttpUrl('OPENAI_BASE_URL') || 'https://api.openai.com/v1',
+  openaiModel: String(process.env.OPENAI_MODEL || '').trim(),
+  openaiTimeoutMs: boundedInteger('OPENAI_TIMEOUT_MS', 90000, { min: 1000, max: 600000 }),
+  openaiExtraBody: optionalJsonObject('OPENAI_EXTRA_BODY'),
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
+  anthropicBaseUrl: optionalHttpUrl('ANTHROPIC_BASE_URL') || 'https://api.anthropic.com',
+  anthropicModel: String(process.env.ANTHROPIC_MODEL || '').trim() || 'claude-opus-5-5',
+  anthropicMaxTokens: boundedInteger('ANTHROPIC_MAX_TOKENS', 16000, { min: 1, max: 1000000 }),
+  anthropicTimeoutMs: boundedInteger('ANTHROPIC_TIMEOUT_MS', 90000, { min: 1000, max: 600000 }),
+  anthropicExtraBody: optionalJsonObject('ANTHROPIC_EXTRA_BODY'),
   codexAuthFile: process.env.CODEX_AUTH_FILE || '',
   codexModel: process.env.CODEX_MODEL || 'openai-codex/gpt-5.5',
   codexBaseUrl: process.env.CODEX_BASE_URL || 'https://chatgpt.com/backend-api/codex',
-  codexTimeoutMs: boundedInteger('CODEX_TIMEOUT_MS', boundedInteger('GEMINI_TIMEOUT_MS', 90000, { min: 1000, max: 600000 }), { min: 1000, max: 600000 }),
+  codexTimeoutMs: boundedInteger('CODEX_TIMEOUT_MS', 90000, { min: 1000, max: 600000 }),
   translateTargetLanguage: process.env.TRANSLATE_TARGET_LANGUAGE || 'Simplified Chinese',
 };
 

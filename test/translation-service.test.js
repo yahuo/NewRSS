@@ -9,7 +9,7 @@ const TranslationService = require('../src/translation-service');
 const TranslationRequestPool = require('../src/translation-request-pool');
 const { buildHtmlTranslationPlan } = require('../src/html-chunker');
 
-test('deepseek provider uses the Chat Completions API for text translation', async () => {
+test('openai provider uses the Chat Completions API for text translation', async () => {
   const calls = [];
   const previousFetch = global.fetch;
   global.fetch = async (url, options) => {
@@ -21,11 +21,11 @@ test('deepseek provider uses the Chat Completions API for text translation', asy
 
   try {
     const service = new TranslationService({
-      translationProvider: 'deepseek',
-      deepseekApiKey: 'deepseek-test-key',
-      deepseekModel: 'deepseek-v4-flash',
-      deepseekBaseUrl: 'https://api.deepseek.com/',
-      deepseekTimeoutMs: 5_000,
+      translationProvider: 'openai',
+      openaiApiKey: 'openai-test-key',
+      openaiModel: 'gpt-test',
+      openaiBaseUrl: 'https://proxy.example/v1/',
+      openaiTimeoutMs: 5_000,
       translationRequestConcurrency: 6,
       translateTargetLanguage: 'Simplified Chinese',
     });
@@ -33,14 +33,14 @@ test('deepseek provider uses the Chat Completions API for text translation', asy
     assert.equal(service.isEnabled(), true);
     assert.equal(await service.translateTitle({ title: 'Test title', sourceUrl: 'https://example.com' }), '测试标题');
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, 'https://api.deepseek.com/chat/completions');
-    assert.equal(calls[0].options.headers.authorization, 'Bearer deepseek-test-key');
+    assert.equal(calls[0].url, 'https://proxy.example/v1/chat/completions');
+    assert.equal(calls[0].options.headers.authorization, 'Bearer openai-test-key');
     const body = JSON.parse(calls[0].options.body);
-    assert.equal(body.model, 'deepseek-v4-flash');
+    assert.equal(body.model, 'gpt-test');
     assert.equal(body.stream, false);
-    assert.equal(body.temperature, 0.2);
-    assert.equal(body.max_tokens, 384_000);
-    assert.deepEqual(body.thinking, { type: 'disabled' });
+    assert.equal(body.temperature, undefined);
+    assert.equal(body.max_tokens, undefined);
+    assert.equal(body.thinking, undefined);
     assert.match(body.messages[0].content, /translation engine/);
     assert.equal(body.messages[0].role, 'system');
     assert.equal(body.messages[1].role, 'user');
@@ -51,7 +51,7 @@ test('deepseek provider uses the Chat Completions API for text translation', asy
   }
 });
 
-test('deepseek provider requests JSON output for whole-article translation', async () => {
+test('openai provider requests JSON output for whole-article translation', async () => {
   const calls = [];
   const previousFetch = global.fetch;
   global.fetch = async (url, options) => {
@@ -71,12 +71,12 @@ test('deepseek provider requests JSON output for whole-article translation', asy
 
   try {
     const service = new TranslationService({
-      translationProvider: 'deepseek',
-      deepseekApiKey: 'deepseek-test-key',
-      deepseekModel: 'deepseek-v4-pro',
-      deepseekBaseUrl: 'https://api.deepseek.com',
-      deepseekTimeoutMs: 5_000,
-      geminiChunkMaxWords: 2_000,
+      translationProvider: 'openai',
+      openaiApiKey: 'openai-test-key',
+      openaiModel: 'deepseek-v4-pro',
+      openaiBaseUrl: 'https://api.deepseek.com/v1',
+      openaiTimeoutMs: 5_000,
+      translationChunkMaxWords: 2_000,
       translationRequestConcurrency: 6,
       translateTargetLanguage: 'Simplified Chinese',
     });
@@ -99,18 +99,33 @@ test('deepseek provider requests JSON output for whole-article translation', asy
   }
 });
 
-test('deepseek provider is disabled without an API key', () => {
-  const service = new TranslationService({
-    translationProvider: 'deepseek',
-    deepseekApiKey: '   ',
-  });
-
-  assert.equal(service.isEnabled(), false);
+test('openai provider is disabled without an API key or model', () => {
+  assert.equal(new TranslationService({
+    translationProvider: 'openai',
+    openaiApiKey: '   ',
+    openaiModel: 'gpt-test',
+  }).isEnabled(), false);
+  assert.equal(new TranslationService({
+    translationProvider: 'openai',
+    openaiApiKey: 'openai-test-key',
+    openaiModel: '',
+  }).isEnabled(), false);
 });
 
-test('deepseek provider surfaces API errors', async () => {
+test('legacy and unknown providers are disabled', () => {
+  for (const translationProvider of ['gemini', 'deepseek', 'unknown']) {
+    assert.equal(new TranslationService({
+      translationProvider,
+      openaiApiKey: 'openai-test-key',
+      openaiModel: 'gpt-test',
+      anthropicApiKey: 'anthropic-test-key',
+    }).isEnabled(), false);
+  }
+});
+
+test('openai provider surfaces API errors', async () => {
   const previousFetch = global.fetch;
-  global.fetch = async () => new Response(JSON.stringify({ error: { message: 'DeepSeek quota exceeded' } }), {
+  global.fetch = async () => new Response(JSON.stringify({ error: { message: 'Upstream quota exceeded' } }), {
     status: 429,
     headers: {
       'content-type': 'application/json',
@@ -120,9 +135,10 @@ test('deepseek provider surfaces API errors', async () => {
 
   try {
     const service = new TranslationService({
-      translationProvider: 'deepseek',
-      deepseekApiKey: 'deepseek-test-key',
-      deepseekTimeoutMs: 5_000,
+      translationProvider: 'openai',
+      openaiApiKey: 'openai-test-key',
+      openaiModel: 'test-model',
+      openaiTimeoutMs: 5_000,
       translationRequestConcurrency: 6,
       translateTargetLanguage: 'Simplified Chinese',
     });
@@ -133,7 +149,7 @@ test('deepseek provider surfaces API errors', async () => {
       service.translateTitle({ title: 'Test title', sourceUrl: '' }),
       (error) => {
         providerError = error;
-        return /DeepSeek quota exceeded/.test(error.message);
+        return /Upstream quota exceeded/.test(error.message);
       }
     );
     const retryAt = new Date(providerError.retryAfter).getTime();
@@ -144,9 +160,9 @@ test('deepseek provider surfaces API errors', async () => {
   }
 });
 
-test('deepseek provider preserves its error when Retry-After is outside the Date range', async () => {
+test('openai provider preserves its error when Retry-After is outside the Date range', async () => {
   const previousFetch = global.fetch;
-  global.fetch = async () => new Response(JSON.stringify({ error: { message: 'DeepSeek quota exceeded' } }), {
+  global.fetch = async () => new Response(JSON.stringify({ error: { message: 'Upstream quota exceeded' } }), {
     status: 429,
     headers: {
       'content-type': 'application/json',
@@ -156,9 +172,10 @@ test('deepseek provider preserves its error when Retry-After is outside the Date
 
   try {
     const service = new TranslationService({
-      translationProvider: 'deepseek',
-      deepseekApiKey: 'deepseek-test-key',
-      deepseekTimeoutMs: 5_000,
+      translationProvider: 'openai',
+      openaiApiKey: 'openai-test-key',
+      openaiModel: 'test-model',
+      openaiTimeoutMs: 5_000,
       translationRequestConcurrency: 6,
       translateTargetLanguage: 'Simplified Chinese',
     });
@@ -167,7 +184,7 @@ test('deepseek provider preserves its error when Retry-After is outside the Date
       service.translateTitle({ title: 'Test title', sourceUrl: '' }),
       (error) => {
         providerError = error;
-        return /DeepSeek quota exceeded/.test(error.message);
+        return /Upstream quota exceeded/.test(error.message);
       }
     );
     assert.equal(providerError.retryAfter, null);
@@ -176,7 +193,7 @@ test('deepseek provider preserves its error when Retry-After is outside the Date
   }
 });
 
-test('deepseek provider rejects truncated, empty, and non-JSON responses', async () => {
+test('openai provider rejects truncated, empty, and non-JSON responses', async () => {
   const responses = [
     jsonResponse({ choices: [{ finish_reason: 'length', message: { content: 'truncated' } }] }),
     jsonResponse({ choices: [{ finish_reason: 'stop', message: { content: '   ' } }] }),
@@ -187,9 +204,10 @@ test('deepseek provider rejects truncated, empty, and non-JSON responses', async
 
   try {
     const service = new TranslationService({
-      translationProvider: 'deepseek',
-      deepseekApiKey: 'deepseek-test-key',
-      deepseekTimeoutMs: 5_000,
+      translationProvider: 'openai',
+      openaiApiKey: 'openai-test-key',
+      openaiModel: 'test-model',
+      openaiTimeoutMs: 5_000,
       translationRequestConcurrency: 6,
       translateTargetLanguage: 'Simplified Chinese',
     });
@@ -202,7 +220,7 @@ test('deepseek provider rejects truncated, empty, and non-JSON responses', async
   }
 });
 
-test('deepseek chunk translation runs concurrently within its per-article cap and preserves order', async () => {
+test('openai chunk translation runs concurrently within its per-article cap and preserves order', async () => {
   let active = 0;
   let maximumActive = 0;
   const started = [];
@@ -227,11 +245,11 @@ test('deepseek chunk translation runs concurrently within its per-article cap an
 
   try {
     const service = new TranslationService({
-      translationProvider: 'deepseek',
-      deepseekApiKey: 'deepseek-test-key',
-      deepseekModel: 'deepseek-v4-flash',
-      deepseekTimeoutMs: 5_000,
-      geminiChunkMaxWords: 200,
+      translationProvider: 'openai',
+      openaiApiKey: 'openai-test-key',
+      openaiModel: 'test-model',
+      openaiTimeoutMs: 5_000,
+      translationChunkMaxWords: 200,
       translationRequestConcurrency: 6,
       translateTargetLanguage: 'Simplified Chinese',
     });
@@ -258,7 +276,7 @@ test('deepseek chunk translation runs concurrently within its per-article cap an
   }
 });
 
-test('deepseek chunk failure cancels active siblings and does not start queued work', async () => {
+test('openai chunk failure cancels active siblings and does not start queued work', async () => {
   let active = 0;
   let maximumActive = 0;
   let cancelled = 0;
@@ -290,9 +308,10 @@ test('deepseek chunk failure cancels active siblings and does not start queued w
 
   try {
     const service = new TranslationService({
-      translationProvider: 'deepseek',
-      deepseekApiKey: 'deepseek-test-key',
-      deepseekTimeoutMs: 5_000,
+      translationProvider: 'openai',
+      openaiApiKey: 'openai-test-key',
+      openaiModel: 'test-model',
+      openaiTimeoutMs: 5_000,
       translationRequestConcurrency: 3,
       translateTargetLanguage: 'Simplified Chinese',
     });
@@ -314,7 +333,7 @@ test('deepseek chunk failure cancels active siblings and does not start queued w
   }
 });
 
-test('deepseek output budget accommodates a large pre block that remains one chunk', async () => {
+test('openai extra body is merged into requests for a large pre block that remains one chunk', async () => {
   const code = Array.from(
     { length: 5_000 },
     (_, index) => `const value${index} = "${String(index).padStart(6, '0')}-${'x'.repeat(16)}";`
@@ -334,9 +353,11 @@ test('deepseek output budget accommodates a large pre block that remains one chu
 
   try {
     const service = new TranslationService({
-      translationProvider: 'deepseek',
-      deepseekApiKey: 'deepseek-test-key',
-      deepseekTimeoutMs: 5_000,
+      translationProvider: 'openai',
+      openaiApiKey: 'openai-test-key',
+      openaiModel: 'test-model',
+      openaiTimeoutMs: 5_000,
+      openaiExtraBody: { max_tokens: 384_000, thinking: { type: 'disabled' }, model: 'ignored', stream: true },
       translationRequestConcurrency: 3,
       translateTargetLanguage: 'Simplified Chinese',
     });
@@ -347,13 +368,16 @@ test('deepseek output budget accommodates a large pre block that remains one chu
     });
 
     assert.equal(requestBody.max_tokens, 384_000);
+    assert.deepEqual(requestBody.thinking, { type: 'disabled' });
+    assert.equal(requestBody.model, 'test-model');
+    assert.equal(requestBody.stream, false);
     assert.match(requestBody.messages[1].content, /const value4999/);
   } finally {
     global.fetch = previousFetch;
   }
 });
 
-test('deepseek provider honors caller cancellation', async () => {
+test('openai provider honors caller cancellation', async () => {
   let notifyFetchStarted;
   const fetchStarted = new Promise((resolve) => {
     notifyFetchStarted = resolve;
@@ -369,9 +393,10 @@ test('deepseek provider honors caller cancellation', async () => {
 
   try {
     const service = new TranslationService({
-      translationProvider: 'deepseek',
-      deepseekApiKey: 'deepseek-test-key',
-      deepseekTimeoutMs: 5_000,
+      translationProvider: 'openai',
+      openaiApiKey: 'openai-test-key',
+      openaiModel: 'test-model',
+      openaiTimeoutMs: 5_000,
       translationRequestConcurrency: 6,
       translateTargetLanguage: 'Simplified Chinese',
     });
@@ -387,7 +412,7 @@ test('deepseek provider honors caller cancellation', async () => {
   }
 });
 
-test('deepseek provider aborts a request after its configured timeout', async () => {
+test('openai provider aborts a request after its configured timeout', async () => {
   const previousFetch = global.fetch;
   global.fetch = async (_url, options) => {
     await abortableDelay(1_000, options.signal);
@@ -396,9 +421,168 @@ test('deepseek provider aborts a request after its configured timeout', async ()
 
   try {
     const service = new TranslationService({
-      translationProvider: 'deepseek',
-      deepseekApiKey: 'deepseek-test-key',
-      deepseekTimeoutMs: 10,
+      translationProvider: 'openai',
+      openaiApiKey: 'openai-test-key',
+      openaiModel: 'test-model',
+      openaiTimeoutMs: 10,
+      translationRequestConcurrency: 6,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+
+    await assert.rejects(
+      service.translateTitle({ title: 'Test title', sourceUrl: '' }),
+      (error) => error?.name === 'AbortError'
+    );
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
+test('anthropic provider uses the Messages API for text translation', async () => {
+  const calls = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse({
+      content: [{ type: 'text', text: '测试' }, { type: 'text', text: '标题' }],
+      stop_reason: 'end_turn',
+    });
+  };
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'anthropic',
+      anthropicApiKey: 'anthropic-test-key',
+      anthropicBaseUrl: 'https://proxy.example/v1/',
+      anthropicTimeoutMs: 5_000,
+      translationRequestConcurrency: 6,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+
+    assert.equal(service.isEnabled(), true);
+    assert.equal(await service.translateTitle({ title: 'Test title', sourceUrl: '' }), '测试标题');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://proxy.example/v1/messages');
+    assert.equal(calls[0].options.headers['x-api-key'], 'anthropic-test-key');
+    assert.equal(calls[0].options.headers['anthropic-version'], '2026-10-21');
+    assert.equal(calls[0].options.headers.authorization, undefined);
+    const body = JSON.parse(calls[0].options.body);
+    assert.equal(body.model, 'claude-opus-5-5');
+    assert.equal(body.max_tokens, 16_000);
+    assert.equal(body.stream, false);
+    assert.equal(body.temperature, undefined);
+    assert.equal(body.thinking, undefined);
+    assert.match(body.system, /translation engine/);
+    assert.equal(body.messages.length, 1);
+    assert.equal(body.messages[0].role, 'user');
+    assert.match(body.messages[0].content, /Test title/);
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
+test('anthropic provider parses JSON whole-article translation and merges extra body', async () => {
+  const calls = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse({
+      content: [{
+        type: 'text',
+        text: `Here you go:\n${JSON.stringify({
+          translatedTitle: '中文标题',
+          translatedContentHtml: '<p>中文正文</p>',
+        })}`,
+      }],
+      stop_reason: 'end_turn',
+    });
+  };
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'anthropic',
+      anthropicApiKey: 'anthropic-test-key',
+      anthropicModel: 'claude-test',
+      anthropicMaxTokens: 32_000,
+      anthropicExtraBody: { output_config: { effort: 'low' }, max_tokens: 1, model: 'ignored' },
+      anthropicTimeoutMs: 5_000,
+      translationChunkMaxWords: 2_000,
+      translationRequestConcurrency: 6,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+
+    const translated = await service.translateArticle({
+      sourceTitle: 'English article title',
+      contentHtml: '<p>This is a long enough English article body for the direct JSON translation path.</p>',
+      sourceUrl: 'https://example.com/article',
+    });
+
+    assert.equal(translated.translatedTitle, '中文标题');
+    assert.equal(translated.translatedContentHtml, '<p>中文正文</p>');
+    assert.equal(translated.provider, 'claude-test');
+    assert.equal(calls[0].url, 'https://api.anthropic.com/v1/messages');
+    const body = JSON.parse(calls[0].options.body);
+    assert.equal(body.model, 'claude-test');
+    assert.equal(body.max_tokens, 32_000);
+    assert.deepEqual(body.output_config, { effort: 'low' });
+    assert.match(body.messages[0].content, /JSON schema/);
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
+test('anthropic provider is disabled without an API key', () => {
+  assert.equal(new TranslationService({ translationProvider: 'anthropic', anthropicApiKey: ' ' }).isEnabled(), false);
+});
+
+test('anthropic provider surfaces API errors, truncation, refusals, and empty output', async () => {
+  const responses = [
+    new Response(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Anthropic rate limited' } }), {
+      status: 429,
+      headers: { 'content-type': 'application/json', 'retry-after': '30' },
+    }),
+    jsonResponse({ content: [{ type: 'text', text: 'partial' }], stop_reason: 'max_tokens' }),
+    jsonResponse({ content: [], stop_reason: 'refusal' }),
+    jsonResponse({ content: [{ type: 'thinking', thinking: 'hidden' }], stop_reason: 'end_turn' }),
+  ];
+  const previousFetch = global.fetch;
+  global.fetch = async () => responses.shift();
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'anthropic',
+      anthropicApiKey: 'anthropic-test-key',
+      anthropicTimeoutMs: 5_000,
+      translationRequestConcurrency: 6,
+      translateTargetLanguage: 'Simplified Chinese',
+    });
+
+    let providerError;
+    await assert.rejects(service.translateTitle({ title: 'Limited', sourceUrl: '' }), (error) => {
+      providerError = error;
+      return /Anthropic rate limited/.test(error.message);
+    });
+    assert.ok(new Date(providerError.retryAfter).getTime() > Date.now() + 25_000);
+    await assert.rejects(service.translateTitle({ title: 'Truncated', sourceUrl: '' }), /stop_reason max_tokens/);
+    await assert.rejects(service.translateTitle({ title: 'Refused', sourceUrl: '' }), /stop_reason refusal/);
+    await assert.rejects(service.translateTitle({ title: 'Empty', sourceUrl: '' }), /Anthropic returned no text/);
+  } finally {
+    global.fetch = previousFetch;
+  }
+});
+
+test('anthropic provider aborts a request after its configured timeout', async () => {
+  const previousFetch = global.fetch;
+  global.fetch = async (_url, options) => {
+    await abortableDelay(1_000, options.signal);
+    return jsonResponse({});
+  };
+
+  try {
+    const service = new TranslationService({
+      translationProvider: 'anthropic',
+      anthropicApiKey: 'anthropic-test-key',
+      anthropicTimeoutMs: 10,
       translationRequestConcurrency: 6,
       translateTargetLanguage: 'Simplified Chinese',
     });
@@ -627,7 +811,7 @@ test('codex-oauth JSON translation accepts fenced or prefixed JSON output', asyn
       codexAuthFile: authFile,
       codexModel: 'openai-codex/gpt-5.5',
       codexTimeoutMs: 5000,
-      geminiChunkMaxWords: 2000,
+      translationChunkMaxWords: 2000,
       translateTargetLanguage: 'Simplified Chinese',
     });
 
@@ -781,7 +965,7 @@ test('codex streaming completion usage is persisted and missing usage stays null
 
 test('codex chunk translation runs concurrently within the shared request bound and preserves order', async (t) => {
   const fixture = createCodexFixture(t, {
-    geminiChunkMaxWords: 200,
+    translationChunkMaxWords: 200,
     translationRequestConcurrency: 3,
   });
   let active = 0;
@@ -1228,7 +1412,7 @@ test('HTML translation plan preserves whitespace inside large preformatted block
   assert.match(plan.chunks[0], /\n    option119\n  \);<\/code><\/pre>$/);
 });
 
-test('Gemini chunk workers stop taking new work after the first failure', async (t) => {
+test('anthropic chunk workers stop taking new work after the first failure', async (t) => {
   const previousFetch = global.fetch;
   let calls = 0;
   global.fetch = async () => {
@@ -1242,7 +1426,8 @@ test('Gemini chunk workers stop taking new work after the first failure', async 
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     return new Response(JSON.stringify({
-      candidates: [{ content: { parts: [{ text: '<p>translated</p>' }] } }],
+      content: [{ type: 'text', text: '<p>translated</p>' }],
+      stop_reason: 'end_turn',
     }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -1251,12 +1436,11 @@ test('Gemini chunk workers stop taking new work after the first failure', async 
   t.after(() => { global.fetch = previousFetch; });
 
   const service = new TranslationService({
-    translationProvider: 'gemini',
-    geminiApiKey: 'test-key',
-    geminiModel: 'test-model',
-    geminiTimeoutMs: 5_000,
-    geminiChunkMaxWords: 200,
-    geminiChunkConcurrency: 3,
+    translationProvider: 'anthropic',
+    anthropicApiKey: 'test-key',
+    anthropicModel: 'test-model',
+    anthropicTimeoutMs: 5_000,
+    translationChunkMaxWords: 200,
     translateTargetLanguage: 'Simplified Chinese',
   });
   const paragraph = Array.from({ length: 210 }, (_, index) => `word${index}`).join(' ');
@@ -1349,8 +1533,7 @@ function createCodexFixture(t, overrides = {}) {
       codexBaseUrl: 'https://chatgpt.com/backend-api/codex',
       codexModel: 'openai-codex/gpt-5.5',
       codexTimeoutMs: 5000,
-      geminiChunkMaxWords: 2000,
-      geminiChunkConcurrency: 3,
+      translationChunkMaxWords: 2000,
       translationRequestConcurrency: 3,
       translateTargetLanguage: 'Simplified Chinese',
       ...overrides,
