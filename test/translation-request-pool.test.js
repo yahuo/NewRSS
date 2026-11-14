@@ -51,7 +51,7 @@ test('translation request pool applies its limit independently per provider', as
   const pool = new TranslationRequestPool(1);
   const started = [];
   let releaseCodex;
-  let releaseGemini;
+  let releaseOpenAi;
 
   const codex = pool.run('codex-oauth', () => {
     started.push('codex');
@@ -59,18 +59,18 @@ test('translation request pool applies its limit independently per provider', as
       releaseCodex = resolve;
     });
   });
-  const gemini = pool.run('gemini', () => {
-    started.push('gemini');
+  const openai = pool.run('openai', () => {
+    started.push('openai');
     return new Promise((resolve) => {
-      releaseGemini = resolve;
+      releaseOpenAi = resolve;
     });
   });
 
   await waitFor(() => started.length === 2);
-  assert.deepEqual(started, ['codex', 'gemini']);
+  assert.deepEqual(started, ['codex', 'openai']);
   releaseCodex();
-  releaseGemini();
-  await Promise.all([codex, gemini]);
+  releaseOpenAi();
+  await Promise.all([codex, openai]);
 });
 
 test('translation request pool shares slots fairly between request groups', async () => {
@@ -108,7 +108,7 @@ test('translation request pool rotates groups when concurrency is one', async ()
   const secondGroup = {};
   const started = [];
   const run = (name, group) =>
-    pool.run('gemini', async () => {
+    pool.run('openai', async () => {
       started.push(name);
       await new Promise((resolve) => setImmediate(resolve));
     }, { group });

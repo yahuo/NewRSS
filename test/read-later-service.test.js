@@ -14,15 +14,37 @@ test('read-later translation can use a provider override independent of global t
     feedService: {},
     config: {
       translationProvider: 'codex-oauth',
-      readLaterTranslationProvider: 'deepseek',
-      deepseekApiKey: 'test-deepseek-key',
+      readLaterTranslationProvider: 'anthropic',
+      readLaterTranslationModel: 'claude-read-later',
+      anthropicApiKey: 'test-anthropic-key',
       codexAuthFile: '/tmp/missing-codex-auth.json',
+      codexModel: 'openai-codex/gpt-5.5',
     },
   });
 
-  assert.equal(service.translationService.config.translationProvider, 'deepseek');
+  assert.equal(service.translationService.config.translationProvider, 'anthropic');
+  assert.equal(service.translationService.config.anthropicModel, 'claude-read-later');
+  assert.equal(service.translationService.config.codexModel, 'openai-codex/gpt-5.5');
   assert.equal(service.translationService.isEnabled(), true);
   assert.equal(service.config.translationProvider, 'codex-oauth');
+});
+
+test('read-later translation model override applies to the inherited provider', () => {
+  const service = new ReadLaterService({
+    db: {},
+    feedService: {},
+    config: {
+      translationProvider: 'openai',
+      readLaterTranslationProvider: '',
+      readLaterTranslationModel: 'gemini-3.5-flash',
+      openaiApiKey: 'test-openai-key',
+      openaiModel: 'deepseek-v4-flash',
+    },
+  });
+
+  assert.equal(service.translationService.config.translationProvider, 'openai');
+  assert.equal(service.translationService.config.openaiModel, 'gemini-3.5-flash');
+  assert.equal(service.config.openaiModel, 'deepseek-v4-flash');
 });
 
 test('read-later translation inherits the global provider when no override is configured', () => {
@@ -50,7 +72,7 @@ test('feed and read-later translations share and obey one provider request pool'
     await new Promise((resolve) => setTimeout(resolve, 10));
     active -= 1;
     return new Response(JSON.stringify({
-      candidates: [{ content: { parts: [{ text: '共享池标题' }] } }],
+      choices: [{ finish_reason: 'stop', message: { content: '共享池标题' } }],
     }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -417,8 +439,8 @@ function createFixture(t, overrides = {}) {
     defaultFeedName: '', defaultFeedUrl: '', defaultFeedFolder: '',
     readLaterFeedName: 'read-later', readLaterFeedTitle: 'Read Later', readLaterFeedFolder: 'Read Later',
     readLaterStoragePath: path.join(directory, 'read-later'), readLaterTranslationProvider: '',
-    translationProvider: 'gemini', geminiApiKey: 'test-key', geminiModel: 'test-model',
-    geminiTimeoutMs: 5_000, geminiChunkMaxWords: 1_200, geminiChunkConcurrency: 1,
+    translationProvider: 'openai', openaiApiKey: 'test-key', openaiModel: 'test-model',
+    openaiTimeoutMs: 5_000, translationChunkMaxWords: 1_200,
     translationRequestConcurrency: 3, readLaterJobConcurrency: 1,
     translateTargetLanguage: 'Simplified Chinese', httpTimeoutMs: 5_000,
     articleMaxBytes: 1024 * 1024, outboundMaxRedirects: 3, outboundAllowedHosts: ['example.com'],

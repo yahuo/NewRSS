@@ -13,10 +13,18 @@ const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120;
 const CODEX_PROVIDER = 'codex-oauth';
-const DEEPSEEK_PROVIDER = 'deepseek';
-const CODEX_CHUNK_CONCURRENCY = 3;
-const DEEPSEEK_CHUNK_CONCURRENCY = 3;
-const DEEPSEEK_MAX_OUTPUT_TOKENS = 384_000;
+const OPENAI_PROVIDER = 'openai';
+const ANTHROPIC_PROVIDER = 'anthropic';
+const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
+const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
+const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5-5';
+const DEFAULT_ANTHROPIC_MAX_TOKENS = 16_000;
+const ANTHROPIC_API_VERSION = '2026-10-21';
+const DEFAULT_API_TIMEOUT_MS = 90_000;
+const DEFAULT_CHUNK_MAX_WORDS = 1_200;
+const CHUNK_CONCURRENCY = 3;
+const TRANSLATION_SYSTEM_PROMPT =
+  'You are a precise translation engine. Follow the user prompt exactly and return only the requested translation output.';
 const CODEX_PROBE_LEASE_GRACE_MS = 5_000;
 const CODEX_PROBE_DELAYS_MINUTES = [15, 30, 60, 120];
 const codexAuthRefreshes = new Map();
@@ -37,11 +45,14 @@ class TranslationService {
     if (provider === CODEX_PROVIDER) {
       return fs.existsSync(resolveCodexAuthFile(this.config));
     }
-    if (provider === DEEPSEEK_PROVIDER) {
-      return Boolean(String(this.config.deepseekApiKey || '').trim());
+    if (provider === ANTHROPIC_PROVIDER) {
+      return Boolean(String(this.config.anthropicApiKey || '').trim());
+    }
+    if (provider === OPENAI_PROVIDER) {
+      return Boolean(String(this.config.openaiApiKey || '').trim() && getTranslationModel(this.config));
     }
 
-    return Boolean(String(this.config.geminiApiKey || '').trim());
+    return false;
   }
 
   shouldTranslate({ title, contentHtml }) {
@@ -77,7 +88,7 @@ class TranslationService {
     }
 
     const htmlPlan = buildHtmlTranslationPlan(html, {
-      maxWords: this.config.geminiChunkMaxWords,
+      maxWords: this.config.translationChunkMaxWords || DEFAULT_CHUNK_MAX_WORDS,
     });
     const shouldUseChunkedHtml = html.length > MAX_TRANSLATABLE_CHARS || htmlPlan.chunks.length > 1;
 
@@ -136,7 +147,7 @@ class TranslationService {
     }
 
     const chunks = chunkMarkdown(rawMarkdown, {
-      maxWords: this.config.geminiChunkMaxWords,
+      maxWords: this.config.translationChunkMaxWords || DEFAULT_CHUNK_MAX_WORDS,
     });
     if (!chunks.length) {
       return null;
@@ -355,8 +366,8 @@ class TranslationService {
 module.exports = TranslationService;
 
 function getTranslationProvider(config) {
-  const provider = String(config.translationProvider || 'gemini').trim().toLowerCase();
-  return provider || 'gemini';
+  const provider = String(config.translationProvider || OPENAI_PROVIDER).trim().toLowerCase();
+  return provider || OPENAI_PROVIDER;
 }
 
 function getTranslationModel(config) {
@@ -364,40 +375,36 @@ function getTranslationModel(config) {
   if (provider === CODEX_PROVIDER) {
     return String(config.codexModel || 'openai-codex/gpt-5.5').trim();
   }
-  if (provider === DEEPSEEK_PROVIDER) {
-    return String(config.deepseekModel || 'deepseek-v4-flash').trim();
+  if (provider === ANTHROPIC_PROVIDER) {
+    return String(config.anthropicModel || DEFAULT_ANTHROPIC_MODEL).trim();
   }
-  return String(config.geminiModel || 'gemini-2.5-flash').trim();
+  if (provider === OPENAI_PROVIDER) {
+    return String(config.openaiModel || '').trim();
+  }
+  return '';
 }
 
 function getChunkConcurrency(config) {
-  const provider = getTranslationProvider(config);
-  if (provider === CODEX_PROVIDER) {
-    return Math.min(
-      CODEX_CHUNK_CONCURRENCY,
-      Math.max(1, Number(config.translationRequestConcurrency) || CODEX_CHUNK_CONCURRENCY)
-    );
-  }
-  if (provider === DEEPSEEK_PROVIDER) {
-    return Math.min(
-      DEEPSEEK_CHUNK_CONCURRENCY,
-      Math.max(1, Number(config.translationRequestConcurrency) || DEEPSEEK_CHUNK_CONCURRENCY)
-    );
-  }
-  return Math.max(1, Number(config.geminiChunkConcurrency) || 3);
+  return Math.min(
+    CHUNK_CONCURRENCY,
+    Math.max(1, Number(config.translationRequestConcurrency) || CHUNK_CONCURRENCY)
+  );
 }
 
 async function callTranslationJson({ config, prompt }) {
   const provider = getTranslationProvider(config);
   if (provider === CODEX_PROVIDER) {
-    const text = await callCodexText({ config, prompt });
-    return parseTranslationJson(text);
+    return parseTranslationJson(await callCodexText({ config, prompt }));
   }
-  if (provider === DEEPSEEK_PROVIDER) {
-    return callDeepSeekJson({ config, prompt });
+  if (provider === ANTHROPIC_PROVIDER) {
+    return parseTranslationJson(await fetchAnthropicContent({ config, prompt }));
   }
-
-  return callGemini({ config, prompt });
+  if (provider === OPENAI_PROVIDER) {
+    return parseTranslationJson(
+      await fetchOpenAiContent({ config, prompt, responseFormat: { type: 'json_object' } })
+    );
+  }
+  throw new Error(`Unsupported translation provider: ${provider}`);
 }
 
 async function callTranslationText({ config, prompt, signal }) {
@@ -405,145 +412,103 @@ async function callTranslationText({ config, prompt, signal }) {
   if (provider === CODEX_PROVIDER) {
     return callCodexText({ config, prompt, signal });
   }
-  if (provider === DEEPSEEK_PROVIDER) {
-    return callDeepSeekText({ config, prompt, signal });
+  if (provider === ANTHROPIC_PROVIDER) {
+    return fetchAnthropicContent({ config, prompt, signal });
   }
-
-  return callGeminiText({ config, prompt, signal });
+  if (provider === OPENAI_PROVIDER) {
+    return fetchOpenAiContent({ config, prompt, signal });
+  }
+  throw new Error(`Unsupported translation provider: ${provider}`);
 }
 
-async function fetchGeminiContent({ config, prompt, generationConfig = {}, signal }) {
-  return runTranslationRequest(config, 'gemini', signal, async () => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Number(config.geminiTimeoutMs) || 90_000);
-    const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
-
-    try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.geminiModel)}:generateContent`,
-        {
-          method: 'POST',
-          signal: requestSignal,
-          headers: {
-            'content-type': 'application/json',
-            'x-goog-api-key': config.geminiApiKey,
-          },
-          body: JSON.stringify({
-            contents: [
-              {
-                role: 'user',
-                parts: [{ text: prompt }],
-              },
-            ],
-            generationConfig: {
-              temperature: 0.2,
-              ...generationConfig,
-            },
-          }),
-        }
-      );
-
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        const message =
-          payload?.error?.message ||
-          payload?.error?.status ||
-          `Gemini request failed with status ${response.status}`;
-        throw new Error(message);
-      }
-
-      const parts = payload?.candidates?.[0]?.content?.parts || [];
-      const text = parts
-        .map((part) => (typeof part?.text === 'string' ? part.text : ''))
-        .join('')
-        .trim();
-      if (!text) {
-        throw new Error('Gemini returned no text');
-      }
-
-      return text;
-    } finally {
-      clearTimeout(timer);
-    }
-  });
-}
-
-async function callGemini({ config, prompt }) {
-  const text = await fetchGeminiContent({
+async function fetchOpenAiContent({ config, prompt, responseFormat, signal }) {
+  const baseUrl = String(config.openaiBaseUrl || DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
+  const payload = await postProviderJson({
     config,
-    prompt,
-    generationConfig: {
-      responseMimeType: 'application/json',
-      responseJsonSchema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          translatedTitle: {
-            type: 'string',
-            description: 'Translated title in the target language.',
-          },
-          translatedContentHtml: {
-            type: 'string',
-            description: 'Translated HTML body in the target language while preserving valid HTML tags and original links.',
-          },
-        },
-        required: ['translatedTitle', 'translatedContentHtml'],
-      },
+    provider: OPENAI_PROVIDER,
+    label: 'OpenAI',
+    url: `${baseUrl}/chat/completions`,
+    timeoutMs: config.openaiTimeoutMs,
+    signal,
+    headers: {
+      authorization: `Bearer ${String(config.openaiApiKey || '').trim()}`,
+    },
+    body: {
+      ...(config.openaiExtraBody || {}),
+      model: getTranslationModel(config),
+      messages: [
+        { role: 'system', content: TRANSLATION_SYSTEM_PROMPT },
+        { role: 'user', content: prompt },
+      ],
+      stream: false,
+      ...(responseFormat ? { response_format: responseFormat } : {}),
     },
   });
-  return JSON.parse(text);
+
+  const choice = payload?.choices?.[0];
+  if (choice?.finish_reason && choice.finish_reason !== 'stop') {
+    throw new Error(`OpenAI response stopped with finish_reason ${choice.finish_reason}`);
+  }
+  const text = String(choice?.message?.content || '').trim();
+  if (!text) {
+    throw new Error('OpenAI returned no text');
+  }
+  return text;
 }
 
-async function callGeminiText({ config, prompt, signal }) {
-  return fetchGeminiContent({ config, prompt, signal });
-}
-
-async function callDeepSeekJson({ config, prompt }) {
-  const text = await fetchDeepSeekContent({
+async function fetchAnthropicContent({ config, prompt, signal }) {
+  const baseUrl = String(config.anthropicBaseUrl || DEFAULT_ANTHROPIC_BASE_URL)
+    .replace(/\/+$/, '')
+    .replace(/\/v1$/, '');
+  const payload = await postProviderJson({
     config,
-    prompt,
-    responseFormat: { type: 'json_object' },
+    provider: ANTHROPIC_PROVIDER,
+    label: 'Anthropic',
+    url: `${baseUrl}/v1/messages`,
+    timeoutMs: config.anthropicTimeoutMs,
+    signal,
+    headers: {
+      'x-api-key': String(config.anthropicApiKey || '').trim(),
+      'anthropic-version': ANTHROPIC_API_VERSION,
+    },
+    body: {
+      ...(config.anthropicExtraBody || {}),
+      model: getTranslationModel(config),
+      max_tokens: Number(config.anthropicMaxTokens) || DEFAULT_ANTHROPIC_MAX_TOKENS,
+      system: TRANSLATION_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: prompt }],
+      stream: false,
+    },
   });
-  return parseTranslationJson(text);
+
+  const stopReason = payload?.stop_reason;
+  if (stopReason && !['end_turn', 'stop_sequence'].includes(stopReason)) {
+    throw new Error(`Anthropic response stopped with stop_reason ${stopReason}`);
+  }
+  const text = (Array.isArray(payload?.content) ? payload.content : [])
+    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join('')
+    .trim();
+  if (!text) {
+    throw new Error('Anthropic returned no text');
+  }
+  return text;
 }
 
-async function callDeepSeekText({ config, prompt, signal }) {
-  return fetchDeepSeekContent({ config, prompt, signal });
-}
-
-async function fetchDeepSeekContent({ config, prompt, responseFormat, signal }) {
-  return runTranslationRequest(config, DEEPSEEK_PROVIDER, signal, async () => {
-    const timeoutMs = Number(config.deepseekTimeoutMs) || 90_000;
+async function postProviderJson({ config, provider, label, url, timeoutMs, signal, headers, body }) {
+  return runTranslationRequest(config, provider, signal, async () => {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), Number(timeoutMs) || DEFAULT_API_TIMEOUT_MS);
     const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
-    const baseUrl = String(config.deepseekBaseUrl || 'https://api.deepseek.com').replace(/\/+$/, '');
 
     try {
-      const body = {
-        model: getTranslationModel(config),
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a precise translation engine. Follow the user prompt exactly and return only the requested translation output.',
-          },
-          {
-            role: 'user',
-            content: prompt,
-          },
-        ],
-        stream: false,
-        temperature: 0.2,
-        thinking: { type: 'disabled' },
-        max_tokens: DEEPSEEK_MAX_OUTPUT_TOKENS,
-        ...(responseFormat ? { response_format: responseFormat } : {}),
-      };
-      const response = await fetch(`${baseUrl}/chat/completions`, {
+      const response = await fetch(url, {
         method: 'POST',
         signal: requestSignal,
         headers: {
           'content-type': 'application/json',
-          authorization: `Bearer ${String(config.deepseekApiKey || '').trim()}`,
+          ...headers,
         },
         body: JSON.stringify(body),
       });
@@ -552,23 +517,14 @@ async function fetchDeepSeekContent({ config, prompt, responseFormat, signal }) 
         const message =
           payload?.error?.message ||
           payload?.error?.code ||
-          `DeepSeek request failed with status ${response.status}`;
+          payload?.error?.type ||
+          `${label} request failed with status ${response.status}`;
         const error = new Error(message);
         const retryAt = parseRetryAfter(readRetryAfter(response, payload), new Date());
         error.retryAfter = retryAt?.toISOString() || null;
         throw error;
       }
-
-      const choice = payload?.choices?.[0];
-      if (choice?.finish_reason && choice.finish_reason !== 'stop') {
-        throw new Error(`DeepSeek response stopped with finish_reason ${choice.finish_reason}`);
-      }
-      const text = String(choice?.message?.content || '').trim();
-      if (!text) {
-        throw new Error('DeepSeek returned no text');
-      }
-
-      return text;
+      return payload;
     } finally {
       clearTimeout(timer);
     }
@@ -832,7 +788,7 @@ function resolveCodexAuthFile(config) {
 }
 
 function getCodexTimeoutMs(config) {
-  return Number(config.codexTimeoutMs) || Number(config.geminiTimeoutMs) || 90_000;
+  return Number(config.codexTimeoutMs) || DEFAULT_API_TIMEOUT_MS;
 }
 
 function readCodexAuthFile(authFile) {

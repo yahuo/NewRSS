@@ -607,15 +607,25 @@ class ReadLaterService {
 
 module.exports = ReadLaterService;
 
+const MODEL_CONFIG_KEYS = {
+  openai: 'openaiModel',
+  anthropic: 'anthropicModel',
+  'codex-oauth': 'codexModel',
+};
+
 function buildReadLaterTranslationConfig(config) {
-  const provider = String(config.readLaterTranslationProvider || '').trim();
-  if (!provider) {
+  const provider = String(config.readLaterTranslationProvider || '').trim().toLowerCase();
+  const model = String(config.readLaterTranslationModel || '').trim();
+  if (!provider && !model) {
     return config;
   }
 
+  const translationProvider = provider || String(config.translationProvider || 'openai').trim().toLowerCase();
+  const modelKey = MODEL_CONFIG_KEYS[translationProvider];
   return {
     ...config,
-    translationProvider: provider,
+    translationProvider,
+    ...(model && modelKey ? { [modelKey]: model } : {}),
   };
 }
 
